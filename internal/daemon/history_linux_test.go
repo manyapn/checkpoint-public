@@ -8,9 +8,11 @@ package daemon
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,19 +278,43 @@ func TestAutosaveCadenceDuringSession(t *testing.T) {
 	// Quiet workspace: the cadence keeps elapsing but nothing changed since the
 	// autosave, so there must be no empty repeat.
 	//
-	// KNOWN INTERMITTENT on small or heavily loaded machines, where an extra
-	// checkpoint can occasionally appear here. Leading hypothesis, NOT yet
-	// confirmed: the capture group's mark is mount-wide, so unrelated filesystem
-	// activity elsewhere on the mount can produce events whose handling fails
-	// under load, incrementing the bounded `missed` counter, which makes the
-	// window non-empty and legitimately triggers an autosave. If that is right it
-	// is real product behavior worth surfacing (the resulting checkpoint is
-	// honestly graded), not a test bug. Do NOT weaken this assertion to silence
-	// it: the guarantee that autosave never cuts an empty checkpoint is what
-	// stops a quiet machine filling a disk.
+	// KNOWN INTERMITTENT on small or heavily loaded machines: an extra
+	// checkpoint occasionally appears here. Seen on a 2-core CI runner and in a
+	// full-suite run on a developer machine, never on an idle 10-core box.
+	//
+	// What has been RULED OUT by experiment, so nobody repeats the work: it is
+	// not foreign filesystem traffic inflating the bounded miss counter. The
+	// capture mark is mount-wide, so that was the leading theory, but 10,000
+	// file writes on the same mount outside the protected root produced missed=0,
+	// no extra checkpoint, and no Limited state. It also did not reproduce in six
+	// runs pinned to two cores under saturating IO.
+	//
+	// Still open: which term of the non-empty test fires. The candidates are a
+	// captured version arriving after the cut, a dirty path from the feed, and a
+	// queue overflow (the groups do not set FAN_UNLIMITED_QUEUE, so a 16k-event
+	// backlog is possible). The failure message below prints each checkpoint's
+	// source, coverage, miss count and entry count, which tells those apart on
+	// sight: an overflow shows PARTIAL, a late capture shows DURABLE with entries
+	// that differ from the previous manifest, and a spurious cut shows DURABLE
+	// with identical entries.
+	//
+	// Do NOT weaken this assertion to silence it. The guarantee that autosave
+	// never cuts an empty checkpoint is what stops a quiet machine filling a
+	// disk, and if the product really does cut empty checkpoints under load then
+	// that is the bug, not the test.
 	time.Sleep(1 * time.Second)
 	if ids, _ := store.IDs(storeDir); len(ids) != 2 {
-		t.Fatalf("autosave must never cut an empty checkpoint, got ids %v", ids)
+		var detail strings.Builder
+		for _, id := range ids {
+			m, err := store.Load(storeDir, id)
+			if err != nil {
+				fmt.Fprintf(&detail, "\n  id=%d unreadable: %v", id, err)
+				continue
+			}
+			fmt.Fprintf(&detail, "\n  id=%d source=%q coverage=%s missed=%d entries=%d",
+				id, m.Source, m.Coverage, m.Missed, len(m.Entries))
+		}
+		t.Fatalf("autosave must never cut an empty checkpoint, got ids %v%s", ids, detail.String())
 	}
 
 	// New work restarts the cadence.
