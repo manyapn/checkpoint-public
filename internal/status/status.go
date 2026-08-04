@@ -1,5 +1,6 @@
-// Package status maps a checkpoint's internal recovery coverage to the graded,
-// user-facing recovery badge. Worst level wins.
+// Package status grades how completely a recorded checkpoint restores, mapping
+// its internal coverage to the badge shown beside it in the history. Worst level
+// wins.
 //
 //	Fully recoverable:           every file and folder restores (Durable, no loss).
 //	Recoverable with exceptions: restores except specific, counted items; the rest

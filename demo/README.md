@@ -1,9 +1,15 @@
 # The checkpoint demo
 
 `demo/run_demo.sh` is the 8-step story from the main README, executed against
-the real binary and **asserted at every step**. It is meant to be run by *you*,
-on *your* machine, so that the claims stop being marketing and start being
-observations about your kernel and your filesystem.
+the real binary and **asserted at every step**. It runs one agent session and
+checks that the second history checkpoint keeps underneath it behaves like
+version control for that session: turns become checkpoints without anyone
+deciding to commit, the history is navigable, a turn can be reverted without
+taking your edits with it, a project deleted from disk comes back out of its
+history, and a state no commit could have held is still there.
+
+It is meant to be run by *you*, on *your* machine, so that the claims stop being
+marketing and start being observations about your kernel and your filesystem.
 
 ```sh
 sudo ./demo/run_demo.sh
@@ -54,16 +60,16 @@ nonzero. It cannot print a success it did not observe.
 
 | Step | Claim | How it is checked |
 |---|---|---|
-| 1 | protection starts, with a complete baseline | `doctor` exits 0; `status` reads `Protected` **and** `Complete baseline: yes`; the change-feed mode is recorded for later steps |
-| 2 | a wrapped agent turn is captured and ends in exactly one durable checkpoint | the refactor, the delete and the outside write are all confirmed on disk; the run output contains one `checkpoint N DURABLE` |
-| 3 | a human edit landed *during* the agent's turn | the agent prints its own start/end timestamps; the human writer records its own; the human's is asserted to fall strictly between them. The human process is a child of the demo, never of `checkpoint run`, which is exactly how provenance tells them apart |
-| 4 | the state report is honest about what it did **not** cover | the agent wrote outside every protected folder, so `status` must read `Limited protection` and must name that exact path; the newest `history` row must carry a recovery badge |
-| 5 | undo reverts the agent and nothing else | both refactored files are back to their pre-turn content; `NOTES.md` is byte-identical to before the undo **and** still differs from its pre-turn hash, so the human's line survived; a pre-undo checkpoint id was printed |
-| 5 | an agent-deleted file comes back | with the change feed: asserted restored **byte-exact** by `undo`. Without it: asserted **not** restored, asserted that `undo` said deletions are unattributable here, and then the exact `restore --only` command `undo` printed is executed and its result checked byte-exact |
-| 5b | a file you both edited is refused, never merged | `undo` must exit **nonzero**, name the file, say `NOTHING was changed`, and leave every file untouched, including the ones it could legally have reverted. Then `undo --save-both` reverts the agent-only file, leaves the live conflicted file byte-identical, and writes the checkpoint version alongside as `NOTES.md.checkpoint-<id>` |
-| 6 | `rm -rf` of the whole project is survivable | a fingerprint of every path (kind, permission bits, symlink target, SHA-256) is taken, the project is genuinely `rm -rf`'d, restored, and the fingerprints must `diff` clean, plus explicit exec-bit, symlink and empty-directory checks |
-| 7 | a file created *and* deleted inside a turn is still recoverable | `recover` must list it (no checkpoint ever held it), `recover --to` must extract it, and the bytes must match what the agent wrote |
-| 8 | it stops cleanly | `protect --stop`, then `status` must read `Not protected`; the store size is printed |
+| 1 | a history opens alongside the project, with a first checkpoint of the whole tree | `doctor` exits 0; `status` reads `Protected` **and** `Complete baseline: yes`; the change-feed mode is recorded for later steps |
+| 2 | a turn commits itself: one agent turn ends in exactly one durable checkpoint, unasked | the refactor, the delete and the outside write are all confirmed on disk; the run output contains one `checkpoint N DURABLE` |
+| 3 | one checkpoint, two authors: a human edit landed *during* the agent's turn | the agent prints its own start/end timestamps; the human writer records its own; the human's is asserted to fall strictly between them. The human process is a child of the demo, never of `checkpoint run`, which is how authorship is recorded per file rather than per checkpoint |
+| 4 | the log is navigable, and says what the history does **not** hold | the agent wrote outside every protected folder, so `status` must read `Limited protection` and must name that exact path; the newest `history` row must carry a badge for how complete its record is |
+| 5 | reverting the turn reverts the agent and nobody else | both refactored files are back to their pre-turn content; `NOTES.md` is byte-identical to before the undo **and** still differs from its pre-turn hash, so the human's line survived; a pre-undo checkpoint id was printed, so the revert is itself in the history |
+| 5 | an agent's delete is a change with an author too | with the change feed: asserted reverted **byte-exact** by `undo`. Without it: asserted **not** reverted, asserted that `undo` said deletions are unattributable here, and then the exact `restore --only` command `undo` printed is executed and its result checked byte-exact |
+| 5b | a file you both wrote is refused, never merged | `undo` must exit **nonzero**, name the file, say `NOTHING was changed`, and leave every file untouched, including the ones it could legally have reverted. Then `undo --save-both` reverts the agent-only file, leaves the live shared file byte-identical, and writes the history's version alongside as `NOTES.md.checkpoint-<id>` |
+| 6 | the history outlives the working tree: `rm -rf` of the whole project is checkoutable | a fingerprint of every path (kind, permission bits, symlink target, SHA-256) is taken, the project is genuinely `rm -rf`'d, restored, and the fingerprints must `diff` clean, plus explicit exec-bit, symlink and empty-directory checks |
+| 7 | a state no commit ever held, a file created *and* deleted inside a turn, is still in the history | `recover` must list it (no checkpoint ever held it), `recover --to` must extract it, and the bytes must match what the agent wrote |
+| 8 | recording stops cleanly and the history stays | `protect --stop`, then `status` must read `Not protected`; the size of the session's history is printed |
 
 ### Is the harness itself trustworthy?
 
@@ -93,10 +99,11 @@ This is the part worth reading twice.
    by process lineage, so a wrapped `claude`, `codex` or `aider` is captured
    identically, but this demo does not exercise any agent's turn-end hook and so
    does not prove those integrations work.
-3. **It does not measure overhead or scale.** The project is 5 files. Nothing
-   here says what a 50k-file monorepo, a `node_modules` install, or a long build
-   costs. That is what `make bench` is for, and the numbers it produces carry
-   their own honesty note in [`bench/README.md`](../bench/README.md).
+3. **It does not measure what recording a session costs, or how it scales.** The
+   project is 5 files. Nothing here says what a 50k-file monorepo, a
+   `node_modules` install, or a long build costs. That is what `make bench` is
+   for, and the numbers it produces carry their own honesty note in
+   [`bench/README.md`](../bench/README.md).
 4. **It does not test power loss.** checkpoint is consistent against `kill -9`
    and daemon crashes, which the test suite covers. It is not consistent against
    the host losing power mid-write, and this demo pulls neither plug.
@@ -105,10 +112,14 @@ This is the part worth reading twice.
    fifos, no credential-file skipping. Those are covered by `go test ./...`, not
    by this script.
 6. **It never claims the change feed works when it does not.** On overlayfs,
-   which is what a default Docker container gives you, step 5 asserts the
-   *degraded* behaviour instead: undo must refuse to guess who deleted the file,
-   must say so, and the manual remedy it prints must work. The closing summary
-   states which of the two paths actually ran.
+   which is what a default Docker container gives you, deletes reach the history
+   with no author, and step 5 asserts the *degraded* behaviour instead: undo
+   must refuse to guess who deleted the file, must say so, and the manual
+   checkout it prints must work. The closing summary states which of the two
+   paths actually ran.
+7. **It is not a demo of git, and nothing here is a substitute for one.** No
+   branch, no merge, no remote and nothing to publish appears in this script,
+   because checkpoint has none of them. The project history is still git's job.
 
 ### Known gaps this demo deliberately steps around
 
@@ -129,12 +140,12 @@ current binary. They are real, and the demo does not pretend they are fixed:
   checkpoint undo          # says "reverted 0, removed 1"; b.txt is still B-agent
   ```
 
-  The content is **not lost**: `checkpoint restore <pre-turn-id> .` still brings
-  the old file back. It is `undo`'s provenance link that is missing.
+  The content is **still in the history**: `checkpoint restore <pre-turn-id> .`
+  brings the old file back. What is missing is the authorship link `undo` needs.
 - **A symlink the agent repoints is not restored.** Creating a symlink is not a
-  close-write, so there is no captured version. On ext4 the observed result of
+  close-write, so no version of it is recorded. On ext4 the observed result of
   `undo` is that the agent's new symlink is *removed* rather than the old target
-  restored. That is recoverable from the pre-undo checkpoint, but it is not what
+  restored. That is checkoutable from the pre-undo checkpoint, but it is not what
   you would expect. The demo's symlink is only exercised through
   restore-byte-exactness (step 6), which does work.
 

@@ -177,9 +177,12 @@ func TestSkipEmptyBoundary(t *testing.T) {
 		t.Fatalf("skip must name the current latest checkpoint, got %+v", resp5)
 	}
 
-	// Scan mode (no feed): emptiness cannot be proven, because deletes are
-	// invisible, so a boundary is NEVER skipped, even with zero changes since
-	// setup.
+	// Scan mode (no feed) skips too, but for a different reason, and the
+	// distinction matters. The event counters cannot prove emptiness here, since
+	// deletes never reach capture. The SCAN can: it walks the whole tree, so a
+	// deleted file is simply absent from the result. Emptiness is therefore
+	// decided from the finished scan rather than from the events that led to it,
+	// which is strictly stronger evidence.
 	root2, storeDir2 := t.TempDir(), t.TempDir()
 	stop2 := startDaemonOrSkip(t, Config{Workspace: root2, StoreDir: storeDir2})
 	defer stop2()
@@ -188,12 +191,32 @@ func TestSkipEmptyBoundary(t *testing.T) {
 		t.Log("tmpdir filesystem supports the change-feed; scan-mode half not exercisable here")
 		return
 	}
-	respScan, err := RequestCheckpoint(SocketPath(storeDir2), "run: empty-scan")
+	writeFile(t, filepath.Join(root2, "kept.txt"), "one\n")
+	respScan, err := RequestCheckpoint(SocketPath(storeDir2), "run: real-change-scan")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if respScan.SkippedEmpty || respScan.ID != 1 {
-		t.Fatalf("scan mode must never skip a boundary, got %+v", respScan)
+	if respScan.SkippedEmpty {
+		t.Fatalf("a scan-mode window with a real write must be recorded, got %+v", respScan)
+	}
+	respScanEmpty, err := RequestCheckpoint(SocketPath(storeDir2), "run: empty-scan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !respScanEmpty.SkippedEmpty || respScanEmpty.ID != respScan.ID {
+		t.Fatalf("an unchanged tree must not be recorded again in scan mode, got %+v", respScanEmpty)
+	}
+	// The safety-relevant direction: a DELETION is a change, and scan mode must
+	// still record it even though no capture event reported it.
+	if err := os.Remove(filepath.Join(root2, "kept.txt")); err != nil {
+		t.Fatal(err)
+	}
+	respScanDel, err := RequestCheckpoint(SocketPath(storeDir2), "run: delete-scan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respScanDel.SkippedEmpty {
+		t.Fatalf("a deletion must be recorded even in scan mode, got %+v", respScanDel)
 	}
 }
 
@@ -302,6 +325,13 @@ func TestAutosaveCadenceDuringSession(t *testing.T) {
 	// never cuts an empty checkpoint is what stops a quiet machine filling a
 	// disk, and if the product really does cut empty checkpoints under load then
 	// that is the bug, not the test.
+	var reasons []string
+	noteAutosaveReason = func(s *server) {
+		reasons = append(reasons, fmt.Sprintf("captured=%d dirty=%d missed=%d feedOverflow=%v capOverflow=%v",
+			s.captured, s.dirtyPaths(), s.w.Missed(), s.feed != nil && s.feed.Overflowed(), overflowCheck(s.w)))
+	}
+	t.Cleanup(func() { noteAutosaveReason = func(*server) {} })
+
 	time.Sleep(1 * time.Second)
 	if ids, _ := store.IDs(storeDir); len(ids) != 2 {
 		var detail strings.Builder
@@ -313,6 +343,9 @@ func TestAutosaveCadenceDuringSession(t *testing.T) {
 			}
 			fmt.Fprintf(&detail, "\n  id=%d source=%q coverage=%s missed=%d entries=%d",
 				id, m.Source, m.Coverage, m.Missed, len(m.Entries))
+		}
+		for i, r := range reasons {
+			fmt.Fprintf(&detail, "\n  autosave #%d fired because: %s", i+1, r)
 		}
 		t.Fatalf("autosave must never cut an empty checkpoint, got ids %v%s", ids, detail.String())
 	}

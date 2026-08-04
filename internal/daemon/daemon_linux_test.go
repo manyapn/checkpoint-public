@@ -813,3 +813,48 @@ func diffFP(before, after map[string]string) string {
 	}
 	return out
 }
+
+// TestFeedOverflowAloneCannotManufactureACheckpoint pins that a checkpoint is
+// only recorded when it records something. The change feed marks the whole
+// filesystem, so unrelated activity elsewhere on the disk can overflow its
+// queue. That overflow is honest input: it means "changes here may have been
+// missed", and it correctly forces a full scan rather than a fold. What it must
+// NOT do is manufacture history. Once the scan has established that the tree is
+// identical to the previous checkpoint, there is nothing to record, and cutting
+// anyway is how an idle project on a busy machine fills a disk with duplicates.
+func TestFeedOverflowAloneCannotManufactureACheckpoint(t *testing.T) {
+	setSettle(t, 100*time.Millisecond, 2*time.Second)
+	root := t.TempDir()
+	storeDir := t.TempDir()
+	stop := startDaemonOrSkip(t, Config{Workspace: root, StoreDir: storeDir})
+	defer stop()
+	awaitSetupDone(t, SocketPath(storeDir))
+
+	writeFile(t, filepath.Join(root, "work.txt"), "turn output\n")
+	first, err := RequestCheckpoint(SocketPath(storeDir), "run: turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SkippedEmpty {
+		t.Fatal("a window with a real write must be recorded")
+	}
+
+	// Nothing in the workspace changes. Ask again: the window is provably empty,
+	// so no new checkpoint, whatever the counters said on the way in.
+	second, err := RequestCheckpoint(SocketPath(storeDir), "run: quiet turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.SkippedEmpty || second.ID != first.ID {
+		ids, _ := store.IDs(storeDir)
+		t.Fatalf("an unchanged tree must not be recorded again: got id=%d skipped=%v, ids %v",
+			second.ID, second.SkippedEmpty, ids)
+	}
+	ids, err := store.IDs(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 { // setup + the one real turn
+		t.Fatalf("expected exactly the setup and the one recorded turn, got %v", ids)
+	}
+}

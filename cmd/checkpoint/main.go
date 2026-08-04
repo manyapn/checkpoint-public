@@ -113,7 +113,7 @@ func prog() string {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `%[1]s: provenance-aware undo and durable checkpoints for coding agents
+	fmt.Fprintf(os.Stderr, `%[1]s: version control for long-running agent sessions
 
 usage (flags must precede positional args):
   %[1]s create  [--store DIR] <project-dir>
@@ -137,9 +137,21 @@ usage (flags must precede positional args):
 
 typical use:
   %[1]s doctor                   will this work on this machine?
-  %[1]s protect                  start standing protection for this project
-  %[1]s run -- <agent command>   run an agent; checkpoint its turn on exit
+  %[1]s protect                  start recording this project's session history
+  %[1]s run -- <agent command>   run an agent; its turn becomes a checkpoint
   %[1]s undo                     revert that turn's agent-only changes
+
+coming from git:
+  git log             -> %[1]s history
+  git checkout <sha>  -> %[1]s restore <id>
+  git revert          -> %[1]s undo      (reverts the agent, keeps your edits)
+  git stash           -> nothing to do; the turn was already recorded
+  git gc              -> %[1]s prune
+  (no equivalent)     -> %[1]s recover   (files that never lived to a commit)
+
+checkpoint is not a replacement for git: no branches, no merges, no remotes,
+nothing to publish. Git holds your project's history; this holds the session's,
+written automatically, with authorship per file, in a store outside the repo.
 
 create/restore: checkpoint the whole project and restore it by id.
 capture: continuously save every completed write, so a file created and

@@ -20,7 +20,7 @@ import (
 // represent).
 func TestCreateRmRfRestoreByteExact(t *testing.T) {
 	// Store lives entirely outside the project, so deleting the project cannot
-	// touch it: the safety net has to survive `rm -rf`.
+	// touch it: the history has to survive `rm -rf` of the project it describes.
 	storeDir := t.TempDir()
 	oc := mustObj(t, storeDir)
 

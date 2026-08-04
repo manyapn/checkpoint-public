@@ -1,5 +1,7 @@
-// Package oplog is the operation journal for checkpoint's multi-file
-// destructive operations (undo and restore).
+// Package oplog is the operation journal for the two commands that rewrite the
+// working tree from recorded history: undo (the agent-scoped revert) and
+// restore (checking a recorded checkpoint back out).
+//
 // The contract: the full plan is journaled BEFORE the first mutation, and the
 // journal is cleared only after the operation completes. An operation
 // interrupted mid-execution therefore leaves its journal behind, making the

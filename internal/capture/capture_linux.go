@@ -1,11 +1,12 @@
 //go:build linux
 
-// Package capture is checkpoint's retained-FD close-write capture: every
-// completed write to the protected workspace is captured the moment a writable
+// Package capture is checkpoint's retained-FD close-write capture: it is how a
+// write enters the session history, without anyone deciding to record it. Every
+// completed write to the watched workspace is captured the moment a writable
 // handle closes, read through the kernel-retained fanotify fd, so the content
 // survives even if the file is unlinked immediately after. Captured content
-// lands in the object store; a version record lands in the salvage log, tagged
-// with the writing process's identity.
+// lands in the object store; a version record lands in the per-write ledger,
+// tagged with the writing process's identity.
 //
 // The package stops there on purpose: it never cuts manifests or decides
 // boundaries (that belongs to the store and the daemon's boundary policy). Just:

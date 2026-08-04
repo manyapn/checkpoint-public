@@ -4,14 +4,16 @@
 //
 // Three things are measured:
 //
-//   - Recovery. Four scenarios, each scored from what is on disk afterwards.
+//   - Whether the session history gives a state back. Four scenarios take a
+//     state away and ask for it, each scored from what is on disk afterwards.
 //   - A git-shadow baseline. The same scenarios against the strongest simple
-//     git strategy, a force-add commit per turn, so checkpoint's numbers have
-//     something to be read against. The shadow git dir lives outside the
-//     workspace; an in-workspace .git would make the rm-rf column an artifact
-//     of where .git happens to live.
-//   - Overhead. Wrapped versus unwrapped, on a write-churn workload and again
-//     on a realistic compile workload.
+//     git strategy, a force-add commit per turn, so the reading is always which
+//     of the two histories still holds the state rather than an unaccompanied
+//     number. The shadow git dir lives outside the workspace; an in-workspace
+//     .git would make the rm-rf column an artifact of where .git happens to
+//     live.
+//   - What recording a session costs. Wrapped versus unwrapped, on a
+//     write-churn workload and again on a realistic compile workload.
 //
 // Three rules keep the harness from flattering the product:
 //

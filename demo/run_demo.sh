@@ -2,6 +2,12 @@
 #
 # The checkpoint demo: an 8-step story that asserts itself.
 #
+# checkpoint is version control for a long-running agent session: a second
+# history, underneath the one you publish, that commits itself at every turn,
+# records authorship per file, and lives outside the project. This script runs
+# a real session and checks, step by step, that the history is on disk and does
+# what version control is supposed to do here.
+#
 # Every step verifies its own outcome against the filesystem and exits nonzero
 # if the outcome is not the one it claims. Nothing here is narrated: if you see
 # "STEP n OK", the assertion printed under it ran and passed on THIS machine.
@@ -35,7 +41,7 @@ while [ $# -gt 0 ]; do
     --bin)  BIN="${2:?--bin needs a path}";        shift 2 ;;
     --ext4) EXT4=1; shift ;;
     --keep) KEEP=1; shift ;;
-    -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -146,7 +152,7 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
 has() { grep -qF -- "$2" "$1"; }
 
 # ============================================================================ #
-step 1 "a real project, protection started"
+step 1 "a real project, and a second history opened underneath it"
 
 cat > "$PROJ/server.py" <<'PYEOF'
 from routes import legacy_route
@@ -172,7 +178,7 @@ ln -sf ../routes.py "$PROJ/bin/routes.py"           # a symlink that must surviv
 printf 'retries=1\n' > "$OUTSIDE/app.conf"          # outside every protected folder
 
 sub "project: $PROJ ($(find "$PROJ" -type f | wc -l) files, an empty dir, an exec bit, a symlink)"
-sub "store:   $STORE (outside the project, which is the whole point)"
+sub "store:   $STORE (the history lives outside the project, which is the whole point)"
 
 cp_ doctor --root "$PROJ" --store "$STORE" || die 1 "doctor reported a FATAL problem on this machine"
 
@@ -185,15 +191,17 @@ printf '%s' "$STATUS" | grep -q '^Complete baseline: yes' || die 1 "no complete 
 FEED=unavailable
 if printf '%s' "$STATUS" | grep -q '^Change feed: active'; then FEED=active; fi
 if [ "$FEED" = active ]; then
-  note "change feed ACTIVE: deletions carry provenance on this filesystem"
+  note "change feed ACTIVE: this filesystem tells checkpoint who deleted a file, so a delete"
+  note "carries an author like every other change does."
 else
   note "change feed UNAVAILABLE here: overlayfs, which is what a default Docker container gives you."
-  note "STEP 5 shows exactly what that costs, on this machine, instead of pretending otherwise."
+  note "Deletes arrive with no author. STEP 5 shows exactly what that costs, on this machine,"
+  note "instead of pretending otherwise."
 fi
-ok 1 "protection is live, with one complete baseline checkpoint"
+ok 1 "the session history is open, and its first checkpoint holds the whole project"
 
 # ============================================================================ #
-step 2 "an agent turn (wrapped): refactor two files, delete a third, write outside"
+step 2 "a turn commits itself: refactor two files, delete a third, write outside"
 
 cat > "$SB/agent_turn.sh" <<'AGENTEOF'
 #!/usr/bin/env bash
@@ -242,10 +250,11 @@ has "$OUTSIDE/app.conf" 'retries=5' || die 2 "the agent's outside-the-project wr
 grep -q 'checkpoint [0-9]* DURABLE' "$SB/run.out" \
   || die 2 "no durable checkpoint was cut at the turn boundary"
 sub "two files refactored, scratch.md deleted, one transient created+deleted, one write outside"
-ok 2 "the agent turn ran wrapped and ended in exactly one durable checkpoint"
+sub "nobody decided when the unit of work was done; the turn boundary did"
+ok 2 "the turn ended and the history committed itself: exactly one durable checkpoint"
 
 # ============================================================================ #
-step 3 "MEANWHILE: the human edited a different file, mid-turn"
+step 3 "two authors inside one turn: the human edited a different file, mid-turn"
 
 A_START="$(sed -n 's/^AGENT_START \([0-9]*\)$/\1/p' "$SB/run.out" | head -1)"
 A_END="$(sed -n 's/^AGENT_END \([0-9]*\)$/\1/p' "$SB/run.out" | head -1)"
@@ -255,11 +264,12 @@ has "$NOTES" 'a line I typed myself' || die 3 "the human edit is missing from NO
 { [ "$H_TS" -gt "$A_START" ] && [ "$H_TS" -lt "$A_END" ]; } \
   || die 3 "the human edit did not land DURING the agent turn (agent $A_START..$A_END, human $H_TS)"
 sub "agent turn spanned ${A_START}..${A_END}; the human write landed at ${H_TS}, strictly inside it"
-sub "the human process was never a descendant of \`checkpoint run\`, which is how they are told apart"
-ok 3 "a human edit landed inside the agent's turn, in a file the agent never touched"
+sub "the human process was never a descendant of \`checkpoint run\`, which is how the history"
+sub "attributes each FILE to an author instead of stamping one author on the whole checkpoint"
+ok 3 "one checkpoint, two authors: the file you wrote is recorded as yours, not the agent's"
 
 # ============================================================================ #
-step 4 "the honest state: status + history"
+step 4 "reading the log: status + history, and what the history could not hold"
 
 STATUS="$(cp_ status --root "$PROJ" --store "$STORE")" || die 4 "status failed"
 printf '%s\n' "$STATUS"
@@ -276,12 +286,13 @@ printf '%s' "$STATUS" | grep -q '^Protection: Limited protection' \
   || die 4 "an uncaptured agent write outside the project did not downgrade protection"
 printf '%s' "$STATUS" | grep -qF "$OUTSIDE/app.conf" \
   || die 4 "status does not name the uncaptured path $OUTSIDE/app.conf"
-sub "protection is Limited, and status names the exact path it could not cover"
-sub "an unrecoverable write is surfaced as a downgrade, never graded as covered"
-ok 4 "status and history report what was covered AND what was not"
+sub "the newest row is the turn that just ran, with a badge for how complete its record is"
+sub "protection is Limited, and status names the exact path the history does not hold"
+sub "a write the history missed is named, never quietly counted as recorded"
+ok 4 "the session log is navigable, and honest about the one write it does not hold"
 
 # ============================================================================ #
-step 5 "undo: the agent's changes go, yours stay"
+step 5 "revert the turn: the agent's changes go, yours stay"
 
 BASE_ID="$(printf '%s' "$HIST" | sed -n 's/^#\([0-9]*\) .*setup.*/\1/p' | head -1)"
 [ -n "$BASE_ID" ] || BASE_ID=0
@@ -296,7 +307,7 @@ set -e
 grep -q 'legacy_route' "$PROJ/server.py" && grep -q 'legacy_route' "$PROJ/routes.py" \
   || die 5 "the agent's refactor was NOT reverted"
 if grep -q 'handle_v2' "$PROJ/server.py"; then die 5 "server.py still holds the agent's refactor"; fi
-sub "both refactored files reverted, whole-file"
+sub "both refactored files reverted, whole-file, because they are the agent's in the record"
 
 # The differentiator: the concurrent human edit must be bit-for-bit untouched.
 [ "$(sha "$NOTES")" = "$NOTES_BEFORE_UNDO" ] \
@@ -304,37 +315,38 @@ sub "both refactored files reverted, whole-file"
 [ "$(sha "$NOTES")" != "$PRE_NOTES_SHA" ] \
   || die 5 "NOTES.md matches its pre-turn hash: the human edit was reverted"
 has "$NOTES" 'a line I typed myself' || die 5 "the human's line is gone"
-sub "NOTES.md byte-identical to before the undo: the human edit survived"
+sub "NOTES.md byte-identical to before the undo: reverting the agent did not revert you"
 
 # The agent-deleted file. This is the one behavior the change feed gates.
 if [ "$FEED" = active ]; then
   [ -f "$PROJ/scratch.md" ] || die 5 "the agent-deleted file was not restored (the change feed is active here, so it should have been)"
   [ "$(sha "$PROJ/scratch.md")" = "$PRE_SCRATCH_SHA" ] || die 5 "the restored file is not byte-exact"
-  sub "the agent-deleted file was restored byte-exact (delete provenance, via the change feed)"
+  sub "the agent-deleted file came back byte-exact: the delete carried an author too"
 else
   if [ -e "$PROJ/scratch.md" ]; then
     die 5 "scratch.md reappeared, but this filesystem cannot attribute deletions, so undo must not guess"
   fi
   grep -q 'cannot attribute deletions' "$SB/undo.out" \
     || die 5 "no change feed here, but undo did not say that deletions are unattributable"
-  note "DEGRADED, HONESTLY: with no change feed, checkpoint cannot prove whether the agent"
-  note "or you deleted scratch.md, so it refuses to guess. It still HAS the file, says so, and"
-  note "prints the command that brings it back. Running that exact command now:"
+  note "DEGRADED, HONESTLY: with no change feed, the history records that scratch.md was"
+  note "deleted but not by whom, so undo refuses to guess. The file itself is still in the"
+  note "history, undo says so, and it prints the command that checks it back out. Running that"
+  note "exact command now:"
   REMEDY_ID="$(sed -n 's/.*restore --only "[^"]*" \([0-9]*\) .*/\1/p' "$SB/undo.out" | head -1)"
   [ -n "$REMEDY_ID" ] || REMEDY_ID="$BASE_ID"
   cp_ restore --only scratch.md --store "$STORE" "$REMEDY_ID" "$PROJ" \
     || die 5 "the remedy undo printed does not work"
   [ "$(sha "$PROJ/scratch.md")" = "$PRE_SCRATCH_SHA" ] \
     || die 5 "the remedy restored something other than the original bytes"
-  sub "the deleted file came back byte-exact via the documented manual remedy"
+  sub "the deleted file came back byte-exact, checked out of the history by hand"
 fi
 
 grep -q 'pre-undo checkpoint [0-9]* saved' "$SB/undo.out" || die 5 "the undo is not itself undoable"
-sub "a pre-undo checkpoint was cut first, so this undo is itself undoable"
+sub "the revert is itself a checkpoint: the history recorded the state it reverted away from"
 note "known gap: edits made by write-temp-then-rename (\`sed -i\`, and the atomic"
 note "saves some editors do) are NOT reverted by undo today. See demo/README.md."
 
-part "5b: and when you BOTH edited the same file"
+part "5b: a file you BOTH wrote is refused, never merged (there is no merge here)"
 
 cat > "$SB/agent_turn2.sh" <<'AGENTEOF'
 #!/usr/bin/env bash
@@ -380,12 +392,12 @@ SIB="$(ls "$PROJ"/NOTES.md.checkpoint-* 2>/dev/null | head -1 || true)"
 [ -n "$SIB" ] || die 5 "--save-both did not write the checkpoint version alongside"
 has "$SIB" 'things I am in the middle of writing' || die 5 "the saved sibling is not the checkpoint version"
 if grep -q 'a line the AGENT appended' "$SIB"; then die 5 "the saved sibling contains the agent's line"; fi
-sub "your file untouched; the checkpoint version written alongside as $(basename "$SIB")"
+sub "your file untouched; the version from the history written alongside as $(basename "$SIB")"
 sub "nothing was line-merged, and nothing of yours was overwritten"
-ok 5 "agent changes reverted, human edits untouched, conflicts refused before any mutation"
+ok 5 "the turn was reverted per file: the agent's undone, yours kept, shared files refused"
 
 # ============================================================================ #
-step 6 "the disaster: rm -rf the whole project, then restore it byte-exact"
+step 6 "rm -rf the whole project, then check it back out of the history, byte-exact"
 
 SAVE_OUT="$(cp_ save --root "$PROJ" --store "$STORE" --name before-disaster)" || die 6 "save failed"
 printf '%s\n' "$SAVE_OUT"
@@ -412,10 +424,11 @@ $(cat "$SB/fp.diff")"
 [ -L "$PROJ/bin/routes.py" ] || die 6 "symlink lost"
 [ -d "$PROJ/logs" ] || die 6 "empty directory lost"
 sub "every path, mode, exec bit, symlink target and byte identical (${RESTORE_MS} ms)"
-ok 6 "rm -rf survived: the project was rebuilt byte-exact from the out-of-tree store"
+sub "the history was never inside the project, so deleting the project did not touch it"
+ok 6 "the working tree was destroyed and rebuilt byte-exact from a history that outlived it"
 
 # ============================================================================ #
-step 7 "the transient: a file created and deleted inside the turn"
+step 7 "a state no commit ever held: a file created and deleted inside one turn"
 
 REC="$(cp_ recover --store "$STORE" "$PROJ")" || die 7 "recover failed"
 printf '%s\n' "$REC"
@@ -425,37 +438,42 @@ cp_ recover --store "$STORE" --to "$SALVAGE" "$PROJ" || die 7 "recover --to fail
 [ -f "$SALVAGE/.agent-tmp.json" ] || die 7 "the transient was not extracted"
 [ "$(cat "$SALVAGE/.agent-tmp.json")" = '{"generated":true}' ] \
   || die 7 "the recovered transient is not byte-exact: $(cat "$SALVAGE/.agent-tmp.json")"
-sub "no checkpoint ever contained this file: capture is continuous, and checkpoints are only labels over it"
-ok 7 "a file that existed only between checkpoints was recovered byte-exact"
+sub "no checkpoint ever contained this file: recording is continuous, and checkpoints are only labels over it"
+sub "this is the state git cannot have, because nothing committed while the file existed"
+ok 7 "a file that lived only between checkpoints came back byte-exact"
 
 # ============================================================================ #
-step 8 "cleanup"
+step 8 "closing the session"
 
 cp_ protect --store "$STORE" --stop "$PROJ" || die 8 "protect --stop failed"
 STATUS="$(cp_ status --root "$PROJ" --store "$STORE")" || die 8 "status failed after stop"
 printf '%s\n' "$STATUS"
 printf '%s' "$STATUS" | grep -q '^Protection: Not protected' \
   || die 8 "protection did not stop (there is no Paused state; stopped reads Not protected)"
-sub "daemon stopped and socket removed; the store is still on disk and still restorable"
+sub "daemon stopped and socket removed; the history is still on disk and still checkoutable"
 STORE_BYTES="$(du -sh "$STORE" 2>/dev/null | cut -f1)"
-sub "store size for this entire demo: ${STORE_BYTES:-unknown}"
+sub "size of the whole session history for this demo: ${STORE_BYTES:-unknown}"
 if [ "$KEEP" = 0 ]; then sub "sandbox (project, store, daemon) about to be deleted; your machine is unchanged"; fi
-ok 8 "protection stopped cleanly"
+ok 8 "recording stopped cleanly, and the session history it wrote is still readable"
 
 TOTAL_MS=$(( $(now_ms) - T_ALL ))
 printf '\n%s────────────────────────────────────────────────────────────────────────%s\n' "$BOLD" "$RESET"
 printf '%sPROVEN ON THIS MACHINE IN %s.%ss%s. Every line below was asserted against disk state:\n' \
   "$BOLD" "$((TOTAL_MS/1000))" "$(( (TOTAL_MS%1000)/100 ))" "$RESET"
-printf '  an agent refactored 2 files, deleted 1, created and deleted a transient, and wrote\n'
-printf '  outside the project, while a human edited a file alongside it. checkpoint reverted\n'
-printf '  every agent change and nothing of the human'\''s; refused to touch a file they both\n'
-printf '  edited (and kept both versions on request); rebuilt the project byte-exact after\n'
-printf '  rm -rf; recovered a file no checkpoint ever held; and named every path it could not\n'
-printf '  cover.\n'
+printf '  A session ran: an agent refactored 2 files, deleted 1, created and deleted a transient,\n'
+printf '  and wrote outside the project, while a human edited a file alongside it. The turn\n'
+printf '  committed itself, with an author per file. The log named the one write it does not\n'
+printf '  hold. Reverting the turn undid every agent change and nothing of the human'\''s, and\n'
+printf '  refused the file they both wrote rather than merging it (keeping both versions on\n'
+printf '  request). After rm -rf, the project was checked back out byte-exact from a history\n'
+printf '  that lives outside it. And a file no commit could ever have held, created and deleted\n'
+printf '  inside one turn, came back byte-exact.\n'
 if [ "$FEED" = active ]; then
-  printf '  Change feed ACTIVE: agent-deleted files were restored by undo automatically.\n'
+  printf '  Change feed ACTIVE: deletes carried an author, so the agent'\''s delete was reverted\n'
+  printf '  automatically.\n'
 else
-  printf '  Change feed UNAVAILABLE on this filesystem: automatic delete attribution was NOT\n'
-  printf '  demonstrated (it cannot be here); the documented manual remedy was run instead.\n'
+  printf '  Change feed UNAVAILABLE on this filesystem: deletes arrive with no author, so that\n'
+  printf '  one revert was NOT demonstrated (it cannot be here). The file was still in the\n'
+  printf '  history, and was checked out by hand instead.\n'
 fi
 printf '%s────────────────────────────────────────────────────────────────────────%s\n' "$BOLD" "$RESET"

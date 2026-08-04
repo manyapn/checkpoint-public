@@ -1,7 +1,8 @@
-// Package daemon is checkpoint's always-on background helper (checkpointd):
-// it owns the long-lived fanotify capture for a watched root, keeps salvaging
-// deleted-file content, and, on an explicit boundary request over a Unix socket,
-// settles briefly and cuts a boundary-scan manifest.
+// Package daemon (checkpointd) is what commits the session history, so that
+// nobody has to remember to: it owns the long-lived fanotify capture for a
+// watched root, keeps recording the content of deleted files, and, on an
+// explicit boundary request over a Unix socket, settles briefly and cuts a
+// boundary-scan manifest, which is this system's commit.
 //
 // The boundary protocol is deliberately SOURCE-AGNOSTIC: a wrapped command's
 // completion (`checkpoint run`), an agent-turn hook, a manual save, and the

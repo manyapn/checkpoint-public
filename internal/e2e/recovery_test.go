@@ -28,7 +28,7 @@ import (
 // TestRecoveryUndoCutsReachablePreUndoCheckpoint pins the rule that undo cuts a
 // pre-undo snapshot before reverting, so the pre-undo state remains
 // REACHABLE. Reachable is the load-bearing word, because a snapshot nobody
-// can name is not a safety net, so the test finds the id the way a client does
+// can name is not a usable history, so the test finds the id the way a client does
 // (history --json, source "pre-undo") and restores it.
 func TestRecoveryUndoCutsReachablePreUndoCheckpoint(t *testing.T) {
 	e := newEnv(t)
@@ -186,7 +186,7 @@ func TestRecoveryRmRfRestoresIntoBothLocations(t *testing.T) {
 	}
 
 	// The destructive step, with protection live: the store is out of tree, so
-	// the safety net is not part of what gets deleted.
+	// the history is not part of what gets deleted.
 	if err := os.RemoveAll(e.WS); err != nil {
 		t.Fatal(err)
 	}

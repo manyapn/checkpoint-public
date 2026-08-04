@@ -1,7 +1,8 @@
-// Package undo implements selective undo: revert the agent's changes since a
-// baseline checkpoint while preserving human work. It is driven by the
-// provenance ledger (the per-write record of who wrote what) rather than by
-// diffing trees.
+// Package undo implements checkpoint's revert: undo the agent's changes since a
+// baseline checkpoint while preserving human work. The revert is scoped by
+// AUTHOR rather than by whole checkpoint, which is possible because authorship
+// is recorded per file: it is driven by the provenance ledger (the per-write
+// record of who wrote what) rather than by diffing trees.
 //
 // The safety rule: only files whose every captured write in the window was the
 // agent's are reverted. A file the human (or an unknown writer) also touched is

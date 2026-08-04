@@ -279,8 +279,50 @@ func (s *server) maybeAutosave() {
 	if !nonEmpty {
 		return
 	}
+	noteAutosaveReason(s)
 	s.cut("autosave", "", false)
 }
+
+// resetWindow clears the per-window loss accounting so each checkpoint's status
+// reflects only what happened since the previous one.
+func (s *server) resetWindow() {
+	s.w.ResetWindow()
+	s.captured = 0
+	s.dirty = map[string]map[string]bool{}
+	if s.feed != nil {
+		s.feed.ResetWindow()
+	}
+}
+
+// sameTree reports whether two manifests describe an identical tree: the same
+// paths, each with the same content ref, kind, mode and link target, and the
+// same named exceptions. Timestamps are deliberately not compared. Mtime is not
+// restored by this product and is not part of what a checkpoint promises, so a
+// file whose bytes and metadata are unchanged describes the same tree whatever
+// its clock says.
+func sameTree(a, b *store.Manifest) bool {
+	if len(a.Entries) != len(b.Entries) || len(a.Exceptions) != len(b.Exceptions) {
+		return false
+	}
+	for rel, ae := range a.Entries {
+		be, ok := b.Entries[rel]
+		if !ok || ae.Kind != be.Kind || ae.Ref != be.Ref ||
+			ae.Mode != be.Mode || ae.Link != be.Link || ae.Size != be.Size {
+			return false
+		}
+	}
+	for i, ax := range a.Exceptions {
+		if ax != b.Exceptions[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// noteAutosaveReason records which term of the non-empty test fired. It exists
+// only so a failing test can say WHY an autosave cut, rather than leaving the
+// next reader to guess from the manifest.
+var noteAutosaveReason = func(s *server) {}
 
 // pollBoth waits up to timeoutMs for either the capture group or the change-feed
 // to become readable.
@@ -457,6 +499,29 @@ func (s *server) cut(source, name string, timedOut bool) Response {
 		}
 		m.Exceptions = append(m.Exceptions, store.Exception{Path: rel, Reason: "write not captured"})
 	}
+	// A posteriori emptiness. The scan or fold has just established the tree's
+	// exact state, so the question "did anything change" can now be answered by
+	// looking at the result instead of trusting the event counters that led us
+	// here. Those counters are conservative on purpose, and one of them cannot
+	// be otherwise: the change feed marks the whole filesystem, so unrelated
+	// activity can overflow its queue, which reads as "something may have
+	// changed here" even when nothing did. Without this check a busy machine
+	// makes an idle project accumulate identical checkpoints on the autosave
+	// cadence, which is exactly the disk-filling behaviour the emptiness rule
+	// exists to prevent.
+	//
+	// Only a checkpoint that would record NOTHING new is dropped: same tree,
+	// same exceptions, full coverage on both sides, no bounded misses to name.
+	// A named request is always cut, because the user asked for this moment. The
+	// window is still reset, since the state has been verified rather than
+	// assumed.
+	if name == "" && s.prev != nil && cov == store.DURABLE &&
+		s.prev.Coverage == store.DURABLE && s.w.Missed() == 0 && sameTree(s.prev, m) {
+		s.resetWindow()
+		return Response{ID: s.prev.ID, Coverage: string(s.prev.Coverage),
+			Entries: len(s.prev.Entries), SkippedEmpty: true}
+	}
+
 	// Id collision: a CLI pre-op snapshot took this id meanwhile (store.Write
 	// refuses to replace rather than destroy the other writer's checkpoint).
 	// Re-sync numbering from disk and retry with a fresh id, bounded, because a
@@ -481,12 +546,7 @@ func (s *server) cut(source, name string, timedOut bool) Response {
 		s.nextID = next
 		m.ID = next
 	}
-	s.w.ResetWindow() // each checkpoint's status reflects only loss since the previous
-	s.captured = 0
-	s.dirty = map[string]map[string]bool{}
-	if s.feed != nil {
-		s.feed.ResetWindow()
-	}
+	s.resetWindow()
 	s.prev = m
 	s.nextID++
 	s.lastCkptNS.Store(m.TimeNS)

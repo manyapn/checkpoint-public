@@ -1,8 +1,11 @@
-// Package provenance is checkpoint's writer attribution: it records, for every
-// captured write, the stable identity of the writing process and its lineage, and
-// classifies the write as agent, human, or unknown, preserving uncertainty
-// honestly. Processes are keyed by stable identity rather than by bare pid, so a
-// recycled pid cannot inherit agent credit.
+// Package provenance is where checkpoint's per-file authorship comes from: it
+// records, for every captured write, the stable identity of the writing process
+// and its lineage, and classifies the write as agent, human, or unknown,
+// preserving uncertainty honestly. Authorship lands on the individual write
+// rather than on a checkpoint as a whole, which is what lets one turn hold the
+// agent's work and yours and still be told apart afterwards. Processes are keyed
+// by stable identity rather than by bare pid, so a recycled pid cannot inherit
+// agent credit.
 //
 // Attribution is by PROCESS LINEAGE, never by which boundary a write fell in:
 // boundary ids group operations, but a write is agent only if its process chain

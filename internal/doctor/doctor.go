@@ -286,13 +286,14 @@ func storeLocationCheck(st string, stErr error, ws string, wsValid bool) Check {
 		c.Remedy = "pass --store DIR, or let checkpoint use its default under $XDG_DATA_HOME/checkpoint"
 		return c
 	}
-	// Out-of-tree is the whole guarantee: an in-tree store dies with
-	// `rm -rf project`, which is the disaster checkpoint exists to survive.
+	// Out-of-tree is the whole guarantee: the session history has to outlive
+	// the workspace it describes, and an in-tree store dies with
+	// `rm -rf project`, taking that history with it.
 	if wsValid {
 		if err := store.CheckStoreLocation(st, ws); err != nil {
 			c.Detail = fmt.Sprintf("%s is not out-of-tree relative to %s: %v", st, ws, err)
 			c.Remedy = "put the store outside the project, e.g. --store $HOME/.local/share/checkpoint/<project>\n" +
-				"(a store inside the project is deleted by the same `rm -rf` it is supposed to recover from)"
+				"(a store inside the project is deleted by the same `rm -rf` it is supposed to outlive)"
 			return c
 		}
 	}

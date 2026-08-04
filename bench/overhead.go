@@ -1,5 +1,6 @@
-// Overhead measurement: what wrapping a command under `checkpoint run` costs,
-// on a write-churn workload and again on a realistic compile workload.
+// Overhead measurement: what it costs to record a session, meaning what running
+// a command under `checkpoint run` adds, on a write-churn workload and again on
+// a realistic compile workload.
 
 package main
 

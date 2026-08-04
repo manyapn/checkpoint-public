@@ -1,9 +1,14 @@
-// Package versionlog is checkpoint's salvage log: an append-only, crash-safe
-// record of every captured completed file version (a close-write's post-image
-// content ref). It is what makes files recoverable that no checkpoint holds: a
-// file created→written→deleted between two boundaries never reaches a manifest,
-// but its close-write was captured here, so its bytes stay recoverable from the
-// object store.
+// Package versionlog is checkpoint's per-write ledger (the salvage log): an
+// append-only, crash-safe record of every captured completed file version (a
+// close-write's post-image content ref), stamped with the writer's identity.
+// It carries the two things a commit-shaped history cannot.
+//
+// First, states no checkpoint ever holds: a file created→written→deleted
+// between two boundaries never reaches a manifest, but its close-write was
+// captured here, so its bytes stay recoverable from the object store. Second,
+// authorship per FILE rather than per checkpoint: every record names who wrote
+// that version, which is what lets a turn be reverted for the agent and left
+// alone for the human.
 //
 // Crash safety: newline-delimited JSON records, single-writer advisory lock, and
 // torn-tail recovery on open. A process killed mid-append truncates to the last

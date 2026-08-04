@@ -1,18 +1,19 @@
-// Package store is checkpoint's durability layer: a per-checkpoint Manifest in
-// checkpoint's own format, recovered by ID, over content held in a git-backed
-// object store (internal/objstore). The latest durable manifest restores
-// byte-exact, including what git alone cannot represent (empty dirs,
-// permissions, symlinks).
+// Package store holds the commits of checkpoint's session history: one
+// Manifest per checkpoint, in checkpoint's own format, addressed by ID, over
+// content held in a git-backed object store (internal/objstore). A manifest is
+// the whole workspace at a boundary, not a diff, so checking out a durable
+// manifest restores the tree byte-exact, including what git alone cannot
+// represent (empty dirs, permissions, symlinks).
 //
 // Manifests are built by an INCREMENTAL BOUNDARY SCAN (walk the tree; reuse a
 // prior ref for a file whose size+mtime are unchanged; capture changed/new files
 // into the object store; detect deletions by absence). A scan cannot miss a
-// delete, which is what makes the headline promise hold: write files, rm -rf the
-// project, restore the latest manifest byte-exact. Folding a change-set over the
-// previous manifest instead (SnapshotFold) costs O(changes) rather than O(tree),
-// but is only correct given a COMPLETE feed of directory-entry events (which
-// needs fanotify in FID mode), so the scan stays the fallback whenever that feed
-// reports a hole.
+// delete, which is what keeps a checkpoint a complete state rather than a
+// partial one: write files, rm -rf the project, restore the latest manifest
+// byte-exact. Folding a change-set over the previous manifest instead
+// (SnapshotFold) costs O(changes) rather than O(tree), but is only correct given
+// a COMPLETE feed of directory-entry events (which needs fanotify in FID mode),
+// so the scan stays the fallback whenever that feed reports a hole.
 //
 // Transients that never reach a boundary, created and written and deleted
 // between two checkpoints, are covered by the per-write ledger
