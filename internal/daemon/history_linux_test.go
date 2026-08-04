@@ -177,12 +177,10 @@ func TestSkipEmptyBoundary(t *testing.T) {
 		t.Fatalf("skip must name the current latest checkpoint, got %+v", resp5)
 	}
 
-	// Scan mode (no feed) skips too, but for a different reason, and the
-	// distinction matters. The event counters cannot prove emptiness here, since
-	// deletes never reach capture. The SCAN can: it walks the whole tree, so a
-	// deleted file is simply absent from the result. Emptiness is therefore
-	// decided from the finished scan rather than from the events that led to it,
-	// which is strictly stronger evidence.
+	// Scan mode (no feed): a REQUESTED boundary is never skipped. The event
+	// counters cannot prove emptiness here, because deletes never reach capture,
+	// and a requested boundary marks session structure that is worth recording
+	// even when its net effect was nothing.
 	root2, storeDir2 := t.TempDir(), t.TempDir()
 	stop2 := startDaemonOrSkip(t, Config{Workspace: root2, StoreDir: storeDir2})
 	defer stop2()
@@ -191,32 +189,12 @@ func TestSkipEmptyBoundary(t *testing.T) {
 		t.Log("tmpdir filesystem supports the change-feed; scan-mode half not exercisable here")
 		return
 	}
-	writeFile(t, filepath.Join(root2, "kept.txt"), "one\n")
-	respScan, err := RequestCheckpoint(SocketPath(storeDir2), "run: real-change-scan")
+	respScan, err := RequestCheckpoint(SocketPath(storeDir2), "run: empty-scan")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if respScan.SkippedEmpty {
-		t.Fatalf("a scan-mode window with a real write must be recorded, got %+v", respScan)
-	}
-	respScanEmpty, err := RequestCheckpoint(SocketPath(storeDir2), "run: empty-scan")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !respScanEmpty.SkippedEmpty || respScanEmpty.ID != respScan.ID {
-		t.Fatalf("an unchanged tree must not be recorded again in scan mode, got %+v", respScanEmpty)
-	}
-	// The safety-relevant direction: a DELETION is a change, and scan mode must
-	// still record it even though no capture event reported it.
-	if err := os.Remove(filepath.Join(root2, "kept.txt")); err != nil {
-		t.Fatal(err)
-	}
-	respScanDel, err := RequestCheckpoint(SocketPath(storeDir2), "run: delete-scan")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if respScanDel.SkippedEmpty {
-		t.Fatalf("a deletion must be recorded even in scan mode, got %+v", respScanDel)
+	if respScan.SkippedEmpty || respScan.ID != 1 {
+		t.Fatalf("scan mode must never skip a REQUESTED boundary, got %+v", respScan)
 	}
 }
 

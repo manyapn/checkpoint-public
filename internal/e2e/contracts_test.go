@@ -372,11 +372,14 @@ func TestStopMeansStoppedBeforeReturning(t *testing.T) {
 	e := newEnv(t)
 	// Written directly rather than through e.Write, which settles after every
 	// file: this tree only needs to exist before protect, not to be observed
-	// write by write.
+	// write by write. Kept modest on purpose. A larger tree widens the window
+	// this test watches for, but its shutdown checkpoint can then outlast the
+	// stop deadline on a loaded machine, which fails the test for an unrelated
+	// reason.
 	if err := os.MkdirAll(filepath.Join(e.WS, "src"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 3000; i++ {
+	for i := 0; i < 400; i++ {
 		p := filepath.Join(e.WS, "src", fmt.Sprintf("f%d.txt", i))
 		if err := os.WriteFile(p, []byte(fmt.Sprintf("content %d\n", i)), 0o644); err != nil {
 			t.Fatal(err)

@@ -185,7 +185,7 @@ func Serve(cfg Config, ready chan<- struct{}, stop <-chan struct{}) error {
 		// files-scanned count from this hook while the first scan runs.
 		store.ScanProgress = func(n int) { s.setupScanned.Store(int64(n)) }
 		s.drain() // events queued since arming belong to the setup window
-		s.cut("setup", "", false)
+		s.cut("setup", "", false, false)
 		store.ScanProgress = nil
 		s.settingUp.Store(false)
 	}
@@ -213,7 +213,7 @@ func Serve(cfg Config, ready chan<- struct{}, stop <-chan struct{}) error {
 			s.lastRescan = time.Now()
 			s.drain()
 			s.drainFeed()
-			s.cut("setup-rescan", "", false)
+			s.cut("setup-rescan", "", false, false)
 		}
 		s.maybeAutosave()
 	}
@@ -231,7 +231,7 @@ func Serve(cfg Config, ready chan<- struct{}, stop <-chan struct{}) error {
 func (s *server) shutdown() error {
 	s.drain() // capture anything queued before leaving
 	s.drainFeed()
-	resp := s.cut("shutdown", "", false)
+	resp := s.cut("shutdown", "", false, false)
 	if resp.Error != "" {
 		// Honest degradation: a shutdown that could not persist the pending
 		// window must say so rather than exit 0 as if it had.
@@ -274,13 +274,13 @@ func (s *server) maybeAutosave() {
 	nonEmpty := s.captured > 0
 	if s.feed != nil {
 		nonEmpty = nonEmpty || s.dirtyPaths() > 0 || s.w.Missed() > 0 ||
-			s.feed.Overflowed() || overflowCheck(s.w)
+			feedOverflowed(s.feed) || overflowCheck(s.w)
 	}
 	if !nonEmpty {
 		return
 	}
 	noteAutosaveReason(s)
-	s.cut("autosave", "", false)
+	s.cut("autosave", "", false, true)
 }
 
 // resetWindow clears the per-window loss accounting so each checkpoint's status
@@ -318,6 +318,11 @@ func sameTree(a, b *store.Manifest) bool {
 	}
 	return true
 }
+
+// feedOverflowed reports whether the change feed lost events. It is a seam, like
+// overflowCheck, so a test can stage a condition the kernel only produces under
+// real load. The production value is the feed's own flag.
+var feedOverflowed = func(f *feed.Feed) bool { return f != nil && f.Overflowed() }
 
 // noteAutosaveReason records which term of the non-empty test fired. It exists
 // only so a failing test can say WHY an autosave cut, rather than leaving the
@@ -438,13 +443,13 @@ func (s *server) serveConn(conn net.Conn, reqCh chan<- reqEnv) {
 // on the event-loop goroutine, so it has exclusive use of the capture instance.
 func (s *server) handleBoundary(req Request) Response {
 	timedOut := s.settle()
-	return s.cut(req.Source, req.Name, timedOut)
+	return s.cut(req.Source, req.Name, timedOut, false)
 }
 
 // cut snapshots and persists a checkpoint immediately (no settle). It is used by
 // handleBoundary after its settle, by streaming setup at daemon start, and by
 // the autosave cadence.
-func (s *server) cut(source, name string, timedOut bool) Response {
+func (s *server) cut(source, name string, timedOut bool, cadence bool) Response {
 	s.drain() // the emptiness check and the fold must both see everything queued
 	s.drainFeed()
 	// Skip-empty: no new manifest when the window is PROVABLY empty, meaning
@@ -456,7 +461,7 @@ func (s *server) cut(source, name string, timedOut bool) Response {
 	// cannot be proven. A named request never skips either, because the user
 	// asked for THIS moment under that name.
 	if name == "" && s.feed != nil && s.prev != nil && s.prev.Coverage == store.DURABLE &&
-		!s.feed.Overflowed() && !overflowCheck(s.w) &&
+		!feedOverflowed(s.feed) && !overflowCheck(s.w) &&
 		s.captured == 0 && s.dirtyPaths() == 0 && s.w.Missed() == 0 {
 		return Response{ID: s.prev.ID, Coverage: string(s.prev.Coverage),
 			Entries: len(s.prev.Entries), SkippedEmpty: true}
@@ -474,7 +479,7 @@ func (s *server) cut(source, name string, timedOut bool) Response {
 	// Fold over the change-set when the feed is live with no known hole and we
 	// have a base; otherwise full scan (a change-set with a hole must never be
 	// folded, because that is how deletions get resurrected).
-	if s.feed != nil && !s.feed.Overflowed() && s.prev != nil {
+	if s.feed != nil && !feedOverflowed(s.feed) && s.prev != nil {
 		dirty := map[string][]string{}
 		for root, set := range s.dirty {
 			for p := range set {
@@ -499,23 +504,28 @@ func (s *server) cut(source, name string, timedOut bool) Response {
 		}
 		m.Exceptions = append(m.Exceptions, store.Exception{Path: rel, Reason: "write not captured"})
 	}
-	// A posteriori emptiness. The scan or fold has just established the tree's
-	// exact state, so the question "did anything change" can now be answered by
-	// looking at the result instead of trusting the event counters that led us
-	// here. Those counters are conservative on purpose, and one of them cannot
-	// be otherwise: the change feed marks the whole filesystem, so unrelated
-	// activity can overflow its queue, which reads as "something may have
-	// changed here" even when nothing did. Without this check a busy machine
-	// makes an idle project accumulate identical checkpoints on the autosave
-	// cadence, which is exactly the disk-filling behaviour the emptiness rule
+	// A posteriori emptiness, for the CADENCE only. The scan or fold has just
+	// established the tree's exact state, so "did anything change" can be
+	// answered from the result instead of from the event counters that led here.
+	// Those counters are conservative on purpose, and one of them cannot be
+	// otherwise: the change feed marks the whole filesystem, so unrelated
+	// activity elsewhere on the disk can overflow its queue, which reads as
+	// "something here may have changed" when nothing did. Without this check, a
+	// busy machine makes an idle project accumulate identical checkpoints on the
+	// autosave cadence, which is the disk-filling behaviour the emptiness rule
 	// exists to prevent.
+	//
+	// Deliberately NOT applied to a requested boundary. Autosave exists only to
+	// bound how much a crash could cost, so an autosave that records nothing has
+	// no reason to exist. A turn ending, a wrapped command exiting, or a manual
+	// save are structure in the session history: that a turn happened is worth
+	// recording even when its net effect was nothing, and dropping it would lose
+	// a marker the timeline is made of.
 	//
 	// Only a checkpoint that would record NOTHING new is dropped: same tree,
 	// same exceptions, full coverage on both sides, no bounded misses to name.
-	// A named request is always cut, because the user asked for this moment. The
-	// window is still reset, since the state has been verified rather than
-	// assumed.
-	if name == "" && s.prev != nil && cov == store.DURABLE &&
+	// The window is still reset, since the state was verified, not assumed.
+	if cadence && name == "" && s.prev != nil && cov == store.DURABLE &&
 		s.prev.Coverage == store.DURABLE && s.w.Missed() == 0 && sameTree(s.prev, m) {
 		s.resetWindow()
 		return Response{ID: s.prev.ID, Coverage: string(s.prev.Coverage),

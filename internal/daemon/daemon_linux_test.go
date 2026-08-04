@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/manyapn/checkpoint-public/internal/capture"
+	"github.com/manyapn/checkpoint-public/internal/feed"
 	"github.com/manyapn/checkpoint-public/internal/objstore"
 	"github.com/manyapn/checkpoint-public/internal/provenance"
 	"github.com/manyapn/checkpoint-public/internal/store"
@@ -814,47 +816,78 @@ func diffFP(before, after map[string]string) string {
 	return out
 }
 
-// TestFeedOverflowAloneCannotManufactureACheckpoint pins that a checkpoint is
-// only recorded when it records something. The change feed marks the whole
-// filesystem, so unrelated activity elsewhere on the disk can overflow its
-// queue. That overflow is honest input: it means "changes here may have been
-// missed", and it correctly forces a full scan rather than a fold. What it must
-// NOT do is manufacture history. Once the scan has established that the tree is
-// identical to the previous checkpoint, there is nothing to record, and cutting
-// anyway is how an idle project on a busy machine fills a disk with duplicates.
-func TestFeedOverflowAloneCannotManufactureACheckpoint(t *testing.T) {
+// TestAutosaveRecordsOnlyWhenThereIsSomethingToRecord pins the cadence rule.
+// The change feed marks the whole filesystem, so activity elsewhere on the disk
+// can overflow its queue, and an overflow honestly means "changes here may have
+// been missed". It correctly forces a full scan instead of a fold. What it must
+// not do is manufacture history: once the scan shows the tree is identical to
+// the previous checkpoint, an autosave has nothing to record, and cutting anyway
+// is how an idle project on a busy machine fills a disk with duplicates.
+//
+// This applies to the cadence ONLY. A requested boundary is session structure
+// and is always recorded, which TestSkipEmptyBoundary pins separately.
+func TestAutosaveRecordsOnlyWhenThereIsSomethingToRecord(t *testing.T) {
 	setSettle(t, 100*time.Millisecond, 2*time.Second)
+	setAutosaveInterval(t, 300*time.Millisecond)
 	root := t.TempDir()
 	storeDir := t.TempDir()
 	stop := startDaemonOrSkip(t, Config{Workspace: root, StoreDir: storeDir})
 	defer stop()
-	awaitSetupDone(t, SocketPath(storeDir))
+	st := awaitSetupDone(t, SocketPath(storeDir))
+	if !st.FeedActive {
+		// Without a feed there is no overflow term to trip, so the staged
+		// condition cannot exist and the test would pass for the wrong reason.
+		t.Skip("this filesystem has no change feed; the overflow path is not exercisable here")
+	}
 
+	if err := RegisterAgentRoot(SocketPath(storeDir), os.Getpid(), selfStart(t)); err != nil {
+		t.Fatal(err)
+	}
 	writeFile(t, filepath.Join(root, "work.txt"), "turn output\n")
-	first, err := RequestCheckpoint(SocketPath(storeDir), "run: turn")
+	ids := awaitCheckpointCount(t, storeDir, 2, 5*time.Second)
+	recorded := ids[len(ids)-1]
+
+	// Force the condition the defect rode in on: report the feed as overflowed,
+	// so every emptiness term the cadence reads says "something may have
+	// changed" while the workspace sits still.
+	restore := forceFeedOverflow(t)
+	defer restore()
+
+	time.Sleep(1200 * time.Millisecond) // four cadence intervals
+	after, err := store.IDs(storeDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.SkippedEmpty {
-		t.Fatal("a window with a real write must be recorded")
+	if len(after) != len(ids) {
+		var detail strings.Builder
+		for _, id := range after {
+			if m, err := store.Load(storeDir, id); err == nil {
+				fmt.Fprintf(&detail, "\n  id=%d source=%q entries=%d", id, m.Source, len(m.Entries))
+			}
+		}
+		t.Fatalf("an overflow with an unchanged tree manufactured checkpoints: %v%s", after, detail.String())
 	}
 
-	// Nothing in the workspace changes. Ask again: the window is provably empty,
-	// so no new checkpoint, whatever the counters said on the way in.
-	second, err := RequestCheckpoint(SocketPath(storeDir), "run: quiet turn")
+	// And the cadence still fires the moment there IS something to record.
+	writeFile(t, filepath.Join(root, "more.txt"), "later output\n")
+	next := awaitCheckpointCount(t, storeDir, len(after)+1, 5*time.Second)
+	m, err := store.Load(storeDir, next[len(next)-1])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !second.SkippedEmpty || second.ID != first.ID {
-		ids, _ := store.IDs(storeDir)
-		t.Fatalf("an unchanged tree must not be recorded again: got id=%d skipped=%v, ids %v",
-			second.ID, second.SkippedEmpty, ids)
+	if m.Source != "autosave" {
+		t.Fatalf("new work must still autosave, got source %q", m.Source)
 	}
-	ids, err := store.IDs(storeDir)
-	if err != nil {
-		t.Fatal(err)
+	if next[len(next)-1] == recorded {
+		t.Fatal("the new work was not recorded at all")
 	}
-	if len(ids) != 2 { // setup + the one real turn
-		t.Fatalf("expected exactly the setup and the one recorded turn, got %v", ids)
-	}
+}
+
+// forceFeedOverflow stages the change feed as overflowed for the duration of a
+// test, which is the condition a busy machine produces and an idle one does not.
+func forceFeedOverflow(t *testing.T) (restore func()) {
+	t.Helper()
+	prev := feedOverflowed
+	feedOverflowed = func(*feed.Feed) bool { return true }
+	return func() { feedOverflowed = prev }
 }
