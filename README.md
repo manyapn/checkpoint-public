@@ -2,19 +2,16 @@
 
 **Version control built for long-running agent sessions.**
 
-Git assumes a person decides when a unit of work is finished, and writes it down. That
-assumption holds for humans. It breaks the moment an agent works autonomously for hours.
+Git assumes a person decides when a unit of work is finished, and writes it down. That holds for humans. It breaks the moment an agent works on its own for hours.
 
-- Keeping a usable timeline would mean committing constantly, and the history becomes noise
-  you have to clean up before anyone can read it.
-- Git records an author per *commit*, not per *change*. Inside one working tree it cannot
-  tell the agent's edits from the ones you made alongside them.
-- A file the agent created and deleted between two commits never existed, as far as git is
-  concerned. So did every intermediate state it passed through.
-- Undoing the agent with `git checkout .` throws away what you wrote in the same window.
+- a usable timeline would mean committing CONSTANTLY, and the history becomes noise you have to clean up before anyone can read it
+- git records an author per commit, not per change, so inside one working tree it cannot tell the agent's edits from the ones you made alongside them
+- a file the agent created and deleted between two commits never existed, as far as git is concerned
+- `git checkout .` to undo the agent throws away what you wrote in the same window
 
-checkpoint keeps a second history underneath the one you publish. It writes itself, it
-knows who made each change, and it never touches your commits.
+checkpoint keeps a second history underneath the one you publish. 
+
+It commits itself, it knows who wrote each file, and it never touches your git history. 
 
 | Coming from git | In checkpoint |
 | --- | --- |
@@ -24,7 +21,7 @@ knows who made each change, and it never touches your commits.
 | `git revert` | `checkpoint undo`, which reverts the agent and keeps you |
 | `git stash`, decided in advance | nothing to decide: it was already recorded |
 | `git gc` | `checkpoint prune` |
-| *no equivalent* | `checkpoint recover`, for files that never lived long enough to be committed |
+| *no equivalent* | `checkpoint recover`, for files that never lived to a commit |
 
 ```console
 $ checkpoint history
@@ -39,27 +36,17 @@ undo of checkpoint 4: reverted 2, removed 0, skipped 0 for review
 pre-undo checkpoint 5 saved (restore it to undo this undo)
 ```
 
-### What it is not
+**checkpoint is NOT a replacement for git.** No branches, no merges, no remotes, nothing here is meant to be published or reviewed. Git holds the history of your project. checkpoint holds the history of the session, which git was never built to hold. 
 
-checkpoint is not a replacement for git, and does not try to be one. There are no branches,
-no merges, no remotes, and nothing here is meant to be published or reviewed. Git stays the
-history of your *project*. checkpoint is the history of the *session*, which git was never
-designed to hold: every turn, automatically, with authorship per file, kept outside the repo
-so that `rm -rf` cannot take it with them.
+Every completed write under a protected directory is captured to a store that lives outside your project, so any checkpoint restores the tree byte-exact: 
+- after a bad refactor
+- after `rm -rf`
+- ...and even for a file the agent created and deleted
+inside a single turn, which was never in git at all
 
-### Why it can do what git cannot
+The harder half is coverage. **checkpoint never claims protection it does not have.** Every checkpoint carries a badge (Fully recoverable, Recoverable with exceptions, or Incomplete), every gap names the exact paths it could not cover, and a filesystem that cannot support the full guarantee tells you so when you run `checkpoint doctor`, not when you try to restore. 
 
-Nothing here requires the agent to cooperate, or to report what it did. Every write on the
-machine goes through the kernel, so checkpoint subscribes there: it is told when each file
-is closed, receives an open handle to the contents (which is why a deleted file is still
-recoverable), and identifies the writer by walking the process tree back to the agent that
-launched it. Contents are stored by hash in git's own loose-object format, outside your
-project.
-
-Two consequences worth stating plainly. Every checkpoint carries a badge of how complete it
-is (Fully recoverable, Recoverable with exceptions, Incomplete), and anything skipped is
-named rather than silently dropped. And credential files are never captured at all, which is
-also reported rather than hidden.
+Capture records the lineage of the process that made each write, so the revert can be scoped by AUTHOR rather than by whole checkpoint. `undo` reverts what the agent wrote and leaves the paragraph you typed alongside it untouched.
 
 ---
 
