@@ -354,6 +354,23 @@ make bench        # recovery and overhead vs a git shadow (needs root)
 
 Go 1.24 or newer. The only runtime dependency is a Linux kernel.
 
+## AI-assisted development
+
+This code was written with AI assistance, heavily. That is worth saying plainly, and it is not the interesting part. 
+
+The interesting part is that a kernel-level tool whose entire job is to not lose your work cannot be shipped on "the model said it works." So the project is built around a verification system, and these were the standing rules: 
+
+- **Kernel behavior was never asserted, only proven.** Model knowledge about `fanotify` edge cases is stale or wrong, and the kernel is the only authority. Every claim about watcher semantics had to be backed by a runnable program that exits 0 on a real kernel before it could be written down as fact.
+- **Gates were append-only, and enforced by a hook.** A gate script could not be edited to make it pass. If a gate looked wrong, the rule was to stop and argue for changing it, never to quietly satisfy it. A missing secrets denylist was found exactly this way: by a gate failing and the failure being investigated instead of silenced.
+- **Test-first, with the test names pinned in advance.** The gates grep for specific test functions, so a passing run with no tests is a failure.
+- **Every defect got a failing test BEFORE it got a fix.** Including the four found by an outside review of the source: a recycled process ID that could attribute your writes to the agent, a stale-content reuse bug, a truncated read stored as complete, and an exclusion rule that silently unprotected whole projects. Each was reproduced first, then fixed, and each keeps its test as a permanent guard.
+- **Results were scored from disk state, never from a self-report.** An agent reporting success is not evidence. The demo asserts against real files, the benchmark fingerprints the tree, and `selftest` re-runs the guarantees on your machine rather than asking you to trust this README.
+- **Adversarial review, in parallel.** Findings were checked by independent agents prompted to refute them, and the product was tested black-box against the built binary by an agent with no knowledge of the implementation.
+
+What that discipline produced is what you can read here: 201 tests including adversarial and privileged kernel cases, an end-to-end suite that drives the real binary against a real daemon, a self-asserting demo, and CI on two architectures. The gate scripts, the kernel proof programs and the rule-by-rule spec belong to the development repo and are not part of this one, which carries the product rather than the scaffolding that produced it. 
+
+**What I owned:** the problem, the architecture, the decision to prove kernel behavior rather than trust it, what counts as done, and every judgment call where correctness and convenience disagreed. AI wrote most of the lines. The system that makes those lines trustworthy is the actual work, and it is the part I would want to be asked about. 
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
