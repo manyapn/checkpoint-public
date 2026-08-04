@@ -1,0 +1,19 @@
+# build output
+/bin/
+/dist/
+
+# benchmark and test output
+/results/
+
+# editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.\#*
+\#*\#
+
+# OS noise
+.DS_Store
+Thumbs.db

@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    # arm64 is exercised but not gating: the runner image and its kernel move
+    # independently of ours, and a fanotify difference there should surface as
+    # a signal, not as a blocked merge.
+    continue-on-error: ${{ matrix.blocking == false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            blocking: true
+          - runner: ubuntu-24.04-arm
+            blocking: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: build
+        run: make build
+
+      - name: vet
+        run: make vet
+
+      # Capture, daemon and end-to-end tests need CAP_SYS_ADMIN for
+      # fanotify_init; without it they skip and prove nothing. PATH is passed
+      # through explicitly because sudo resets it and drops the Go toolchain.
+      - name: test
+        run: sudo -E env "PATH=$PATH" make test
+
+      - name: doctor
+        run: sudo ./bin/checkpoint doctor
+
+      # --work "$PWD" points the selftest at the runner's real ext4 workspace
+      # rather than /tmp, so the change-feed-dependent guarantees are actually
+      # exercised instead of skipped.
+      - name: selftest
+        run: sudo ./bin/checkpoint selftest --work "$PWD"
