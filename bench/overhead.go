@@ -111,6 +111,139 @@ func measureRoutineCut(base string) int64 {
 	return medianDur(cuts).Milliseconds()
 }
 
+// measureUndo times ROLLBACK: `checkpoint undo` end to end, from fork/exec of
+// the binary until it exits, on a tree of treeFiles files where one agent turn
+// rewrote changedFiles of them.
+//
+// What is timed is the whole user-visible command: process start, store open,
+// plan build, the pre-undo checkpoint it cuts, and every file it writes back.
+// Nothing is subtracted. Two things make that number readable rather than
+// flattering, and both are reported next to it:
+//
+//   - the workload dimensions, because rollback latency scales with the turn.
+//     A median measured against one reverted file is a measurement of exec
+//     overhead wearing a rollback costume;
+//   - startup_floor_ms, the same binary run as `checkpoint version`, which
+//     does no store work at all. Any undo median near the floor is dominated
+//     by process start.
+//
+// A sample counts only if undo exited 0 AND every changed file is back to its
+// seeded bytes. Failed samples are dropped and the ACHIEVED count is reported,
+// so a median is never labelled with a denominator it did not have.
+func measureUndo(base string, samples, treeFiles, changedFiles int) undoResult {
+	res := undoResult{TreeFiles: treeFiles, ChangedFiles: changedFiles}
+
+	// The floor: exec, flag parse, exit. The first run pays cold page cache, so
+	// it is discarded rather than averaged in.
+	var floors []time.Duration
+	for i := 0; i < 6; i++ {
+		start := time.Now()
+		exec.Command(bin, "version").Run()
+		if i > 0 {
+			floors = append(floors, time.Since(start))
+		}
+	}
+	if len(floors) > 0 {
+		res.StartupFloorMS = msOf(medianDur(floors))
+	}
+
+	var undos []time.Duration
+	for i := 0; i < samples; i++ {
+		e, err := newEnv(base, "undo-lat", i)
+		if err != nil {
+			continue
+		}
+		seedWideTree(e.ws, treeFiles)
+		if err := e.start(); err != nil {
+			e.stop() // a half-started daemon must not bias later samples
+			continue
+		}
+		if _, err := e.cli("run", "--root", e.ws, "--store", e.store, "--",
+			"bash", "-c", turnScript(e.ws, changedFiles)); err != nil {
+			e.stop()
+			continue
+		}
+		start := time.Now()
+		out, err := e.cli("undo", "--root", e.ws, "--store", e.store)
+		elapsed := time.Since(start)
+		e.stop()
+		if err != nil {
+			res.Note = "undo failed: " + firstLine(out)
+			continue
+		}
+		if !revertedAll(e.ws, treeFiles, changedFiles) {
+			res.Note = "undo did not restore the seeded bytes"
+			continue
+		}
+		undos = append(undos, elapsed)
+	}
+	res.Samples = len(undos)
+	if len(undos) == 0 {
+		if res.Note == "" {
+			res.Note = "no sample completed"
+		}
+		return res
+	}
+	sort.Slice(undos, func(i, j int) bool { return undos[i] < undos[j] })
+	res.MedianMS = msOf(medianDur(undos))
+	res.MinMS = msOf(undos[0])
+	res.MaxMS = msOf(undos[len(undos)-1])
+	return res
+}
+
+// seedWideTree lays down n files spread over 20 directories: a tree big enough
+// that walking it is not free, which is the point of measuring against it.
+func seedWideTree(ws string, n int) {
+	for i := 0; i < 20; i++ {
+		os.MkdirAll(filepath.Join(ws, fmt.Sprintf("pkg%d", i)), 0o755)
+	}
+	for i := 0; i < n; i++ {
+		os.WriteFile(wideFile(ws, i), []byte(seedBytes(i)), 0o644)
+	}
+}
+
+func wideFile(ws string, i int) string {
+	return filepath.Join(ws, fmt.Sprintf("pkg%d", i%20), fmt.Sprintf("f%d.txt", i))
+}
+
+func seedBytes(i int) string { return fmt.Sprintf("seed %d\n", i) }
+
+// turnScript is the agent turn: rewrite the first n files of the tree.
+func turnScript(ws string, n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "echo AGENT-EDIT > %s\n", wideFile(ws, i))
+	}
+	return b.String()
+}
+
+// revertedAll reports whether every file the turn rewrote is back to its
+// seeded bytes. A sample that did not actually roll back is not a rollback
+// timing.
+func revertedAll(ws string, treeFiles, changedFiles int) bool {
+	for i := 0; i < changedFiles && i < treeFiles; i++ {
+		b, err := os.ReadFile(wideFile(ws, i))
+		if err != nil || string(b) != seedBytes(i) {
+			return false
+		}
+	}
+	return true
+}
+
+// msOf renders a duration in milliseconds to microsecond resolution. Rollback
+// lands in single-digit milliseconds on small turns, where whole milliseconds
+// throw away most of the signal.
+func msOf(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
 // measureRealistic times overhead against a realistic agent task. The churn
 // measurement above resolves microseconds per write well, but its percentage
 // has no resolving power at all: both sides are noise at millisecond scale.

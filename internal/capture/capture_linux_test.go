@@ -393,3 +393,159 @@ func TestCaptureNeverStoresSecrets(t *testing.T) {
 		}
 	}
 }
+
+// TestReadAllPartialThenErrorIsReported pins the content read against silent
+// truncation: when read() hands back bytes and THEN fails with a non-EOF error,
+// the bytes so far are a truncated prefix, not the file. A non-blocking pipe
+// reproduces exactly that shape with a real kernel errno (data, then EAGAIN)
+// with no mocking. Returning those bytes as a successful capture would store a
+// truncated version and report it as fully recoverable.
+func TestReadAllPartialThenErrorIsReported(t *testing.T) {
+	var fds [2]int
+	if err := unix.Pipe2(fds[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+
+	const prefix = "first chunk of the file"
+	if _, err := unix.Write(fds[1], []byte(prefix)); err != nil {
+		t.Fatal(err)
+	}
+	// The writer is still open, so the reader is not at EOF: the second read
+	// fails with EAGAIN, mid-"file".
+	got, err := readAll(fds[0], int64(len(prefix)))
+	if err == nil {
+		t.Fatalf("a read that failed mid-file must be reported, got %d bytes (%q) and nil error", len(got), got)
+	}
+	if got != nil {
+		t.Fatalf("a failed read must not hand back a truncated prefix, got %q", got)
+	}
+}
+
+// TestPartialReadIsMissedNotTruncated drives the same failure through the real
+// capture path: a close-write whose content read fails partway must be a NAMED
+// miss (surfaced, downgrading the checkpoint), never a silently truncated
+// version that reads as fully recoverable.
+func TestPartialReadIsMissedNotTruncated(t *testing.T) {
+	ws := t.TempDir()
+	storeDir := t.TempDir()
+	w := newOrSkip(t, ws, storeDir)
+	defer w.Close()
+
+	const prefix = "TRUNCATED-PREFIX"
+	var calls int
+	orig := readFD
+	readFD = func(fd int, p []byte) (int, error) {
+		calls++
+		if calls == 1 {
+			return copy(p, prefix), nil
+		}
+		return 0, unix.EIO // fails mid-file, after bytes were already handed back
+	}
+	defer func() { readFD = orig }()
+
+	p := filepath.Join(ws, "half.txt")
+	if err := os.WriteFile(p, bytes.Repeat([]byte("A"), 128*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for w.Missed() == 0 && time.Now().Before(deadline) {
+		w.Drain()
+		time.Sleep(20 * time.Millisecond)
+	}
+	readFD = orig
+
+	if _, ok := versionFor(w.Versions(), "/half.txt"); ok {
+		t.Fatal("a partially-read capture must not be versioned: it would report truncated content as recoverable")
+	}
+	if w.Missed() == 0 {
+		t.Fatal("a failed content read must count as a missed capture")
+	}
+	found := false
+	for _, mp := range w.MissedPaths() {
+		if mp == p {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the missed path must be NAMED, got %v", w.MissedPaths())
+	}
+	oc, err := objstore.Open(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := oc.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range refs {
+		b, err := oc.Get(ref)
+		if err != nil {
+			continue
+		}
+		if bytes.Contains(b, []byte(prefix)) {
+			t.Fatalf("truncated content reached the object store as %s", ref)
+		}
+	}
+}
+
+// TestWorkspaceUnderExcludedParentIsCaptured: the bulk-exclude list names
+// rebuildable directories INSIDE the protected root. A workspace that merely
+// SITS under a directory with one of those names (/home/me/build/proj) is an
+// ordinary project and must be captured in full; excluding it would leave the
+// user unprotected while the tool reports the workspace protected.
+func TestWorkspaceUnderExcludedParentIsCaptured(t *testing.T) {
+	for _, parent := range []string{"build", "dist", "target", ".git", "node_modules", "__pycache__", ".venv"} {
+		t.Run(parent, func(t *testing.T) {
+			ws := filepath.Join(t.TempDir(), parent, "proj")
+			if err := os.MkdirAll(filepath.Join(ws, "src"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			storeDir := t.TempDir()
+			w := newOrSkip(t, ws, storeDir)
+			defer w.Close()
+
+			want := []byte("package main\n")
+			if err := os.WriteFile(filepath.Join(ws, "src/main.go"), want, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			vs := drainUntil(t, w, func(vs []versionlog.Version) bool {
+				_, ok := versionFor(vs, "/src/main.go")
+				return ok
+			})
+			v, _ := versionFor(vs, "/src/main.go")
+			if got := content(t, storeDir, v.Ref); !bytes.Equal(got, want) {
+				t.Fatalf("content mismatch: got %q want %q", got, want)
+			}
+
+			// Deletes take the same exclusion decision and must agree.
+			del := filepath.Join(ws, "src/gone.go")
+			if err := w.RecordDelete(del, int32(os.Getpid())); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := versionFor(w.Versions(), "/src/gone.go"); !ok {
+				t.Fatal("a delete inside the workspace must be journaled, whatever the workspace's parent is named")
+			}
+
+			// Exclusion WITHIN the workspace is unchanged.
+			inner := filepath.Join(ws, "node_modules", "deep")
+			if err := os.MkdirAll(inner, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(inner, "junk.js"), []byte("x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ws, "after.txt"), []byte("y\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			drainUntil(t, w, func(vs []versionlog.Version) bool {
+				_, ok := versionFor(vs, "/after.txt")
+				return ok
+			})
+			if _, ok := versionFor(w.Versions(), "/junk.js"); ok {
+				t.Fatal("a rebuildable dir inside the workspace must still be excluded")
+			}
+		})
+	}
+}

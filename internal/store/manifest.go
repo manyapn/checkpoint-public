@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/manyapn/checkpoint-public/internal/objstore"
 )
@@ -59,6 +60,16 @@ type Entry struct {
 	Link    string `json:"link,omitempty"` // symlink: target
 	Size    int64  `json:"size,omitempty"` // file: for incremental reuse
 	MtimeNS int64  `json:"mtime_ns,omitempty"`
+	// CtimeNS is the inode change time, the second half of the reuse key.
+	// Mtime is USER-SETTABLE (utimensat, which every "preserve timestamps"
+	// tool calls), so size+mtime alone can be forged: rewrite a file with
+	// same-length content, put the old mtime back, and a size+mtime scan
+	// reuses the previous ref, i.e. the checkpoint claims bytes that are not
+	// on disk and says nothing about it. Ctime is bumped by the kernel on
+	// every write and cannot be set from userspace, so it closes that hole.
+	// Additive: an entry from an older manifest carries 0 and is never
+	// reused, costing one rehash pass and then self-healing.
+	CtimeNS int64 `json:"ctime_ns,omitempty"`
 }
 
 // Exception is one NAMED item a checkpoint could not cover: the path (relative
@@ -88,6 +99,17 @@ type Manifest struct {
 	// lost data (Coverage still governs recoverability).
 	Source         string `json:"source,omitempty"`
 	SettleTimedOut bool   `json:"settle_timed_out,omitempty"`
+
+	// ScanNS is the wall clock when this manifest finished capturing content. It
+	// is the trust anchor for the NEXT incremental scan: inode timestamps come
+	// from a coarse clock (and some filesystems only keep whole seconds), so a
+	// write landing in the same timestamp tick as our read leaves size, mtime
+	// AND ctime untouched and is therefore invisible to a stat comparison. An
+	// entry whose ctime is not comfortably older than the scan that recorded it
+	// is not reused; it is read again (see reusable). Set by Snapshot and
+	// SnapshotFold, never by the caller. Additive: 0 on older manifests, which
+	// disables reuse for one pass and then self-heals.
+	ScanNS int64 `json:"scan_ns,omitempty"`
 
 	// Name is the user's label for a named checkpoint (`save --name`). Additive;
 	// absent on automatic checkpoints. A named checkpoint survives pruning.
@@ -183,8 +205,10 @@ func Snapshot(root string, oc *objstore.Store, prev *Manifest, id int, timeNS in
 		defer func() { ScanProgress(scanned) }()
 	}
 	var prevEntries map[string]Entry
+	var prevScanNS int64
 	if prev != nil {
 		prevEntries = prev.Entries
+		prevScanNS = prev.ScanNS
 	}
 	progress := func() {
 		scanned++
@@ -192,7 +216,7 @@ func Snapshot(root string, oc *objstore.Store, prev *Manifest, id int, timeNS in
 			ScanProgress(scanned)
 		}
 	}
-	err := scanTree(root, oc, prevEntries, m.Entries, func(rel, reason string) {
+	err := scanTree(root, oc, prevEntries, prevScanNS, m.Entries, func(rel, reason string) {
 		m.Exceptions = append(m.Exceptions, Exception{Path: rel, Reason: reason})
 	}, progress)
 	if err != nil {
@@ -205,7 +229,7 @@ func Snapshot(root string, oc *objstore.Store, prev *Manifest, id int, timeNS in
 			prevExtra = prev.Extra[ex]
 		}
 		exRoot := ex // exceptions under an extra root are named by absolute path
-		err := scanTree(ex, oc, prevExtra, entries, func(rel, reason string) {
+		err := scanTree(ex, oc, prevExtra, prevScanNS, entries, func(rel, reason string) {
 			m.Exceptions = append(m.Exceptions, Exception{Path: filepath.Join(exRoot, rel), Reason: reason})
 		}, progress)
 		if err != nil {
@@ -217,12 +241,14 @@ func Snapshot(root string, oc *objstore.Store, prev *Manifest, id int, timeNS in
 		m.Extra[ex] = entries
 	}
 	sort.Slice(m.Exceptions, func(i, j int) bool { return m.Exceptions[i].Path < m.Exceptions[j].Path })
+	m.ScanNS = time.Now().UnixNano() // capture finished: the next scan's trust anchor
 	return m, nil
 }
 
 // scanTree walks one protected root, filling out with its entries (incremental
-// against prevEntries) and reporting per-path skips through except.
-func scanTree(root string, oc *objstore.Store, prevEntries map[string]Entry, out map[string]Entry, except func(rel, reason string), progress func()) error {
+// against prevEntries, which were recorded by a scan that finished at
+// prevScanNS) and reporting per-path skips through except.
+func scanTree(root string, oc *objstore.Store, prevEntries map[string]Entry, prevScanNS int64, out map[string]Entry, except func(rel, reason string), progress func()) error {
 	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if p == root {
 			return nil
@@ -265,9 +291,8 @@ func scanTree(root string, oc *objstore.Store, prevEntries map[string]Entry, out
 		case fi.IsDir():
 			out[rel] = Entry{Kind: KindDir, Mode: unixMode(fi.Mode())}
 		case fi.Mode().IsRegular():
-			e := Entry{Kind: KindFile, Mode: unixMode(fi.Mode()), Size: fi.Size(), MtimeNS: fi.ModTime().UnixNano()}
-			if pe, ok := prevEntries[rel]; ok && pe.Kind == KindFile &&
-				pe.Size == e.Size && pe.MtimeNS == e.MtimeNS && oc.Has(pe.Ref) {
+			e := fileEntry(fi)
+			if pe, ok := prevEntries[rel]; ok && reusable(pe, e, prevScanNS, oc) {
 				e.Ref = pe.Ref // incremental reuse: unchanged file
 				out[rel] = e
 				return nil
@@ -290,6 +315,55 @@ func scanTree(root string, oc *objstore.Store, prevEntries map[string]Entry, out
 		}
 		return nil
 	})
+}
+
+// fileEntry is the stat-only part of a regular file's entry (everything but
+// Ref). Built identically by the scan and the fold so their manifests compare
+// equal for a file neither had to re-read.
+func fileEntry(fi fs.FileInfo) Entry {
+	return Entry{
+		Kind:    KindFile,
+		Mode:    unixMode(fi.Mode()),
+		Size:    fi.Size(),
+		MtimeNS: fi.ModTime().UnixNano(),
+		CtimeNS: ctimeNS(fi),
+	}
+}
+
+// statSettleNS is how much older than the recording scan a file's ctime must be
+// before that ctime is accepted as proof of "unchanged". Inode timestamps are
+// stamped from a COARSE clock (millisecond-ish ticks), and some filesystems
+// store only whole seconds, so two writes inside one tick are indistinguishable
+// by stat. One second covers both. The cost is bounded and self-limiting: only
+// files touched within a second of a checkpoint are re-read at the next one.
+const statSettleNS = int64(1e9)
+
+// reusable reports whether prior entry pe can stand in for the file just
+// statted as e, i.e. whether the scan may skip reading the bytes. prevScanNS is
+// the ScanNS of the manifest pe came from.
+//
+// Size, mtime AND ctime must match, and pe's ctime must predate its own scan by
+// statSettleNS:
+//
+//   - mtime alone is worthless as a change key: utimensat lets any process put
+//     an old mtime back after rewriting a file, so "same size, same mtime" can
+//     be manufactured at will (see Entry.CtimeNS).
+//   - ctime cannot be set from userspace, but it is only as fine as the clock
+//     that stamps it, hence the settle window (see Manifest.ScanNS).
+//
+// Anything we cannot check (no recorded ctime, no recorded scan time: an older
+// manifest, or a platform without ctime) means no reuse. The penalty is a
+// re-read; the alternative is a checkpoint that silently references content
+// that is no longer on disk.
+func reusable(pe, e Entry, prevScanNS int64, oc *objstore.Store) bool {
+	return pe.Kind == KindFile &&
+		pe.Size == e.Size &&
+		pe.MtimeNS == e.MtimeNS &&
+		pe.CtimeNS == e.CtimeNS &&
+		pe.CtimeNS != 0 &&
+		prevScanNS != 0 &&
+		pe.CtimeNS < prevScanNS-statSettleNS &&
+		oc.Has(pe.Ref)
 }
 
 // Write persists a manifest atomically (tmp write + rename, so a visible

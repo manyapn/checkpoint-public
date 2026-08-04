@@ -75,6 +75,26 @@ type overheadResult struct {
 	RoutineCutMS int64 `json:"routine_cut_ms"`
 }
 
+// undoResult is rollback latency: `checkpoint undo` timed end to end, from exec
+// to exit, against a stated workload. The workload dimensions travel with the
+// number because rollback cost scales with the turn being reverted, and a
+// median quoted without them says nothing.
+type undoResult struct {
+	TreeFiles    int `json:"tree_files"`    // files in the workspace
+	ChangedFiles int `json:"changed_files"` // files the agent turn rewrote
+	// Samples is the ACHIEVED count: samples where undo exited 0 and every
+	// changed file was verified back to its seeded bytes.
+	Samples  int     `json:"samples"`
+	MedianMS float64 `json:"median_ms"`
+	MinMS    float64 `json:"min_ms"`
+	MaxMS    float64 `json:"max_ms"`
+	// StartupFloorMS is the same binary invoked as `checkpoint version`, which
+	// touches no store. It is the exec cost every undo also pays, and it is what
+	// a suspiciously small median is usually made of.
+	StartupFloorMS float64 `json:"startup_floor_ms"`
+	Note           string  `json:"note,omitempty"`
+}
+
 // realisticResult is overhead against a realistic task. The churn number has no
 // resolving power against a percentage bar (both sides are noise at millisecond
 // scale), so this measures a compile workload instead.
@@ -102,10 +122,21 @@ type report struct {
 	GitShadow  []scenarioResult `json:"git_shadow"`
 	Overhead   overheadResult   `json:"overhead"`
 	Realistic  realisticResult  `json:"overhead_realistic"`
+	Undo       undoResult       `json:"undo_latency"`
 	Aggregate  map[string]any   `json:"aggregate"`
 }
 
 // --- entry point -------------------------------------------------------------
+
+// recoveryScenarios names every recovery scenario this harness defines, in run
+// order, and gitShadowScenarios the baseline ones. A run scores
+// len(recoveryScenarios) x rounds rounds and no more: at the default five
+// rounds that is 20 scored recovery rounds plus 15 baseline rounds. The counts
+// live here so they can be asserted rather than remembered.
+var (
+	recoveryScenarios  = []string{"rm_rf_restore", "transient_salvage", "human_preservation", "agent_delete_undo"}
+	gitShadowScenarios = []string{"git_rm_rf_restore", "git_transient", "git_human_preservation"}
+)
 
 var (
 	bin    string
@@ -146,27 +177,21 @@ func main() {
 			gitHumanPreservation(base, round),
 		)
 	}
+	// The run loop and the scenario list must not drift apart: the denominator
+	// the report is read with comes from the list, so a scenario added to one
+	// and not the other would quietly change what a percentage is out of.
+	if len(r.Scenarios) != len(recoveryScenarios)*(*rounds) ||
+		len(r.GitShadow) != len(gitShadowScenarios)*(*rounds) {
+		fatal("scenario list and run loop disagree: %d/%d rounds recorded for %d/%d scenarios",
+			len(r.Scenarios), len(r.GitShadow), len(recoveryScenarios), len(gitShadowScenarios))
+	}
 	r.Overhead = measureOverhead(base, r.FeedActive)
 	r.Realistic = measureRealistic(base)
+	// Rollback latency, on a tree big enough that the walk is not free: 500
+	// files, of which one agent turn rewrote 20.
+	r.Undo = measureUndo(base, 9, 500, 20)
 
-	agg := map[string]any{}
-	for _, name := range []string{"rm_rf_restore", "transient_salvage", "human_preservation", "agent_delete_undo"} {
-		agg[name+"_pct"] = pct(r.Scenarios, name)
-	}
-	for _, name := range []string{"git_rm_rf_restore", "git_transient", "git_human_preservation"} {
-		agg[name+"_pct"] = pct(r.GitShadow, name)
-	}
-	agg["overhead_pct"] = r.Overhead.OverheadPct
-	if r.Realistic.OverheadPct != nil {
-		agg["overhead_realistic_pct"] = *r.Realistic.OverheadPct
-	} else {
-		agg["overhead_realistic_pct"] = nil // skipped (no gcc, say) becomes JSON null
-	}
-	agg["realistic_unwrapped_ms"] = r.Realistic.UnwrappedMS
-	agg["boundary_ms"] = r.Overhead.BoundaryMS
-	agg["routine_cut_ms"] = r.Overhead.RoutineCutMS
-	agg["us_per_write"] = r.Overhead.UsPerWrite
-	agg["feed_active"] = r.FeedActive
+	agg := aggregate(r)
 	r.Aggregate = agg
 
 	os.MkdirAll(filepath.Dir(*outFl), 0o755)
@@ -183,6 +208,35 @@ func main() {
 	for _, k := range keys {
 		fmt.Printf("  %-28s %v\n", k, agg[k])
 	}
+}
+
+// aggregate folds a finished report into the flat summary accept.sh reads.
+func aggregate(r *report) map[string]any {
+	agg := map[string]any{}
+	for _, name := range recoveryScenarios {
+		agg[name+"_pct"] = pct(r.Scenarios, name)
+	}
+	for _, name := range gitShadowScenarios {
+		agg[name+"_pct"] = pct(r.GitShadow, name)
+	}
+	agg["overhead_pct"] = r.Overhead.OverheadPct
+	if r.Realistic.OverheadPct != nil {
+		agg["overhead_realistic_pct"] = *r.Realistic.OverheadPct
+	} else {
+		agg["overhead_realistic_pct"] = nil // skipped (no gcc, say) becomes JSON null
+	}
+	agg["realistic_unwrapped_ms"] = r.Realistic.UnwrappedMS
+	agg["boundary_ms"] = r.Overhead.BoundaryMS
+	agg["routine_cut_ms"] = r.Overhead.RoutineCutMS
+	// Rollback: the median travels with its denominator and its workload, so
+	// the aggregate alone cannot be quoted as a bare headline number.
+	agg["undo_ms"] = r.Undo.MedianMS
+	agg["undo_samples"] = r.Undo.Samples
+	agg["undo_tree_files"] = r.Undo.TreeFiles
+	agg["undo_changed_files"] = r.Undo.ChangedFiles
+	agg["us_per_write"] = r.Overhead.UsPerWrite
+	agg["feed_active"] = r.FeedActive
+	return agg
 }
 
 // pct is the share of rounds of one scenario that scored recovered.

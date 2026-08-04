@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // SnapshotFold builds the next manifest by FOLDING a change-set over prev
@@ -36,6 +37,11 @@ func SnapshotFold(root string, oc *objstore.Store, prev *Manifest, id int, timeN
 	m := &Manifest{ID: id, TimeNS: timeNS, Root: root, Coverage: cov, Missed: missed, Entries: map[string]Entry{}}
 	except := func(path, reason string) {
 		m.Exceptions = append(m.Exceptions, Exception{Path: path, Reason: reason})
+	}
+
+	var prevScanNS int64
+	if prev != nil {
+		prevScanNS = prev.ScanNS
 	}
 
 	foldOne := func(r string, prevEntries map[string]Entry, out map[string]Entry, exceptRel func(rel, reason string)) error {
@@ -94,7 +100,7 @@ func SnapshotFold(root string, oc *objstore.Store, prev *Manifest, id int, timeN
 						subPrev[strings.TrimPrefix(k, pfx)] = e
 					}
 				}
-				if err := scanTree(abs, oc, subPrev, sub, func(srel, reason string) {
+				if err := scanTree(abs, oc, subPrev, prevScanNS, sub, func(srel, reason string) {
 					exceptRel(rel+"/"+srel, reason)
 				}, nil); err != nil {
 					return err
@@ -104,13 +110,14 @@ func SnapshotFold(root string, oc *objstore.Store, prev *Manifest, id int, timeN
 					out[pfx+k] = e
 				}
 			case fi.Mode().IsRegular():
-				e := Entry{Kind: KindFile, Mode: unixMode(fi.Mode()), Size: fi.Size(), MtimeNS: fi.ModTime().UnixNano()}
-				if pe, ok := prevEntries[rel]; ok && pe.Kind == KindFile &&
-					pe.Size == e.Size && pe.MtimeNS == e.MtimeNS && oc.Has(pe.Ref) {
-					e.Ref = pe.Ref
-					out[rel] = e
-					continue
-				}
+				// No stat shortcut here, deliberately. Being in the dirty set IS
+				// evidence that this path was written, so reusing prev's ref
+				// because size+mtime happen to match would checkpoint content we
+				// have positive reason to believe is stale (a same-length rewrite
+				// with the timestamp put back is all it takes), silently. The
+				// dirty set is the change-set, so reading it is O(what actually
+				// changed), which is the fold's whole budget anyway.
+				e := fileEntry(fi)
 				content, err := readFile(abs)
 				if err != nil {
 					exceptRel(rel, "unreadable: "+err.Error())
@@ -156,6 +163,7 @@ func SnapshotFold(root string, oc *objstore.Store, prev *Manifest, id int, timeN
 		m.Extra[ex] = entries
 	}
 	sort.Slice(m.Exceptions, func(i, j int) bool { return m.Exceptions[i].Path < m.Exceptions[j].Path })
+	m.ScanNS = time.Now().UnixNano() // capture finished: the next scan's trust anchor
 	return m, nil
 }
 

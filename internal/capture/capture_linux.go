@@ -77,7 +77,16 @@ type Watcher struct {
 // keeps counting).
 const maxOutsideListed = 20
 
-var bulkExcludes = []string{"/.git/", "/node_modules/", "/build/", "/target/", "/dist/", "/__pycache__/", "/.venv/"}
+// bulkExcludes is the default-skip list of rebuildable directories (protect
+// meaningful work, not regenerable bulk), plus .git. Matched as path COMPONENTS
+// relative to the protected root, never as substrings of the absolute path:
+// these names are only meaningful inside the workspace, and a workspace that
+// happens to live under a directory of the same name (~/build/proj) is an
+// ordinary project. Mirrors store.defaultExcludes, which governs the scan path.
+var bulkExcludes = map[string]bool{
+	".git": true, "node_modules": true, "build": true, "target": true,
+	"dist": true, "__pycache__": true, ".venv": true,
+}
 
 // New opens the store + version log and arms a fanotify mount mark for
 // FAN_CLOSE_WRITE over the workspace and each extra protected folder. A mount
@@ -277,16 +286,10 @@ func (w *Watcher) handle(evFD int, evPID int32) bool {
 		w.miss(path)
 		return false
 	}
-	content := make([]byte, 0, st.Size)
-	tmp := make([]byte, 64*1024)
-	for {
-		n, err := unix.Read(evFD, tmp)
-		if n > 0 {
-			content = append(content, tmp[:n]...)
-		}
-		if n == 0 || err != nil {
-			break
-		}
+	content, err := readAll(evFD, st.Size)
+	if err != nil {
+		w.miss(path)
+		return false
 	}
 	ref, _, err := w.oc.Put(content) // persist blob first
 	if err != nil {
@@ -307,6 +310,34 @@ func (w *Watcher) handle(evFD int, evPID int32) bool {
 		return false
 	}
 	return true
+}
+
+// readFD is a seam so tests can drive a read failure through the real capture
+// path (a mid-file read error cannot be provoked from userspace on an ordinary
+// file).
+var readFD = unix.Read
+
+// readAll reads the whole file behind fd. Short reads are normal and are looped
+// over; EINTR is retried. Any other read error is FATAL to this capture: the
+// bytes read so far are a truncated prefix, and storing them would put a
+// silently truncated version in the store and report it as fully recoverable.
+// The caller turns the error into a named miss, so the loss is surfaced.
+func readAll(fd int, size int64) ([]byte, error) {
+	content := make([]byte, 0, size)
+	tmp := make([]byte, 64*1024)
+	for {
+		n, err := readFD(fd, tmp)
+		if err != nil {
+			if err == unix.EINTR {
+				continue // no bytes consumed: a signal, not a loss
+			}
+			return nil, err
+		}
+		if n == 0 {
+			return content, nil // EOF: the whole file
+		}
+		content = append(content, tmp[:n]...)
+	}
 }
 
 // RecordDelete journals delete provenance for path: who removed it, classified
@@ -397,19 +428,40 @@ func (w *Watcher) classify(evPID int32) (provenance.Class, int, uint64) {
 	return provenance.Classify(chain, resolved, roots), pid, wstart
 }
 
-// protected reports whether path sits under any protected root.
-func (w *Watcher) protected(path string) bool {
+// rootFor returns the protected root path sits under, and whether it sits under
+// one at all. The LONGEST match wins, so an extra protected folder nested inside
+// the workspace scopes exclusions to itself: --protect on ~/proj/build means the
+// user wants that tree, and the root they named is not "bulk" to them.
+func (w *Watcher) rootFor(path string) (string, bool) {
+	best := ""
 	for _, r := range w.roots {
-		if strings.HasPrefix(path, r+"/") {
-			return true
+		if strings.HasPrefix(path, r+"/") && len(r) > len(best) {
+			best = r
 		}
 	}
-	return false
+	return best, best != ""
 }
 
+// protected reports whether path sits under any protected root.
+func (w *Watcher) protected(path string) bool {
+	_, ok := w.rootFor(path)
+	return ok
+}
+
+// excluded reports whether path lives under a bulk-excluded directory. The
+// decision is made on the path RELATIVE to its protected root: comparing
+// against the absolute path would exclude every file in a workspace whose own
+// parent directory is named build/dist/target/.git, leaving the user entirely
+// uncaptured while the tool reported the workspace protected. Only the
+// directory components are considered; a FILE named build is real work.
 func (w *Watcher) excluded(path string) bool {
-	for _, seg := range bulkExcludes {
-		if strings.Contains(path, seg) {
+	root, ok := w.rootFor(path)
+	if !ok {
+		return false
+	}
+	segs := strings.Split(path[len(root)+1:], "/")
+	for _, seg := range segs[:len(segs)-1] {
+		if bulkExcludes[seg] {
 			return true
 		}
 	}

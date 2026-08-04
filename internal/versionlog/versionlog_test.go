@@ -1,9 +1,12 @@
 package versionlog
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestAppendReadRoundTrip(t *testing.T) {
@@ -149,3 +152,56 @@ const (
 	refA = "0000000000000000000000000000000000000000"
 	refB = "1111111111111111111111111111111111111111"
 )
+
+// TestOpenWaitsBrieflyForTheLock pins that a second Open waits rather than
+// failing instantly. A daemon that is shutting down holds this lock while it
+// cuts its final checkpoint, so a restart arriving a moment early must not be a
+// hard failure. The second Open here succeeds only because the first is closed
+// while it is waiting.
+func TestOpenWaitsBrieflyForTheLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "versionlog")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		first.Close()
+	}()
+	start := time.Now()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open must wait for a lock released during the window, got: %v", err)
+	}
+	defer second.Close()
+	if waited := time.Since(start); waited < 250*time.Millisecond {
+		t.Fatalf("Open returned after %s: it cannot have waited for the holder", waited)
+	}
+}
+
+// TestOpenNamesTheLockHolder pins that giving up is diagnosable: an "already
+// locked" message with no holder tells the user nothing they can act on.
+func TestOpenNamesTheLockHolder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "versionlog")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if err := os.WriteFile(filepath.Join(dir, "daemon.pid"), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	err = lockWithin(f, 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("a held lock must not be acquired")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("pid %d", os.Getpid())) {
+		t.Fatalf("the error must name the holding pid, got: %v", err)
+	}
+}

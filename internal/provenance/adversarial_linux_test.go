@@ -9,12 +9,15 @@
 package provenance
 
 import (
+	"bufio"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // deadPid returns a pid that is genuinely dead and unreadable in /proc,
@@ -35,13 +38,15 @@ func deadPid(t *testing.T) int {
 // seedChain seeds tr's birth cache with a synthetic parent chain of the given
 // depth: writer = base, each pid's parent the next pid up, the last entry the
 // intended terminal. Base pids start above PID_MAX_LIMIT (4194304) so no live
-// /proc entry can ever contradict the cache. Returns the writer pid and the
-// terminal's identity.
+// /proc entry can ever contradict the cache. Entries are seeded as just-confirmed
+// so the walk exercises the chain, not the staleness guard. Returns the writer
+// pid and the terminal's identity.
 func seedChain(tr *Tracker, base, depth int) (int, Identity) {
+	now := time.Now()
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	for i := 0; i < depth; i++ {
-		tr.cache[base+i] = procInfo{start: uint64(90000 + i), ppid: base + i + 1}
+		tr.cache[base+i] = procInfo{start: uint64(90000 + i), ppid: base + i + 1, seen: now}
 	}
 	last := base + depth - 1
 	return base, Identity{Pid: last, Start: uint64(90000 + depth - 1)}
@@ -142,7 +147,7 @@ func TestVanishedMidWalkIsUnknown(t *testing.T) {
 	tr := NewTracker()
 	const writer = 100000001 // above PID_MAX_LIMIT: the cache is its only source
 	tr.mu.Lock()
-	tr.cache[writer] = procInfo{start: 4242, ppid: dead}
+	tr.cache[writer] = procInfo{start: 4242, ppid: dead, seen: time.Now()}
 	tr.mu.Unlock()
 
 	self := selfIdentity(t)
@@ -264,12 +269,135 @@ func TestStaleWriterCacheLiveMismatchNeverAgent(t *testing.T) {
 	// Stage the stale cache: the pid's dead predecessor, born of the agent root.
 	tr := NewTracker()
 	tr.mu.Lock()
-	tr.cache[writerPid] = procInfo{start: liveStart + 999, ppid: rootCmd.Process.Pid}
+	tr.cache[writerPid] = procInfo{start: liveStart + 999, ppid: rootCmd.Process.Pid, seen: time.Now()}
 	tr.mu.Unlock()
 
 	chain, resolved := tr.Lineage(writerPid, roots)
 	if got := Classify(chain, resolved, roots); got == Agent {
 		t.Fatalf("live pid contradicting the birth cache must never classify Agent (chain %v, resolved %v)", chain, resolved)
+	}
+}
+
+// spawnAndReport starts `bash -c script` and returns the command plus the first
+// integer the script writes to stdout (used to learn a grandchild's pid).
+func spawnAndReport(t *testing.T, script string) (*exec.Cmd, int) {
+	t.Helper()
+	cmd := exec.Command("bash", "-c", script)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	if _, err := fmt.Fscan(bufio.NewReader(out), &pid); err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		t.Fatalf("reading child pid from %q: %v", script, err)
+	}
+	return cmd, pid
+}
+
+// waitGone blocks until pid is unreadable in /proc, i.e. the writer is dead and
+// reaped before its write gets classified.
+func waitGone(t *testing.T, pid int) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if _, _, ok := readStat(pid); !ok {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("pid %d never left /proc", pid)
+}
+
+// TestRecycledDeadPidNeverInheritsAgentAncestry stages the reuse case the live
+// mismatch check cannot see: a one-shot child of the agent root exits, its pid
+// is handed to a HUMAN shell's child, and that writer is itself dead by the time
+// its write is classified. With no live process to contradict the birth cache,
+// the corpse's agent ancestry is the only record of that pid, and inheriting it
+// would revert a human's edit. The reuse is forced deterministically by pointing
+// the namespace's pid allocator back at the freed pid.
+func TestRecycledDeadPidNeverInheritsAgentAncestry(t *testing.T) {
+	if _, err := os.Stat("/proc/sys/kernel/ns_last_pid"); err != nil {
+		t.Skip("no /proc/sys/kernel/ns_last_pid: cannot stage a deterministic pid reuse")
+	}
+	tr := NewTracker()
+	stop := make(chan struct{})
+	go tr.Run(stop)
+	defer close(stop)
+	tr.SetActive(true) // a session is live: exactly when agent roots are registered
+
+	// The agent root, plus a one-shot child born under it that then exits. The
+	// birth cache exists precisely so this corpse still resolves.
+	rootCmd, agentChild := spawnAndReport(t, "sleep 0.3 & echo $!; wait; sleep 30")
+	defer func() { rootCmd.Process.Kill(); rootCmd.Wait() }()
+	rootStart, ok := StartTime(rootCmd.Process.Pid)
+	if !ok {
+		t.Fatal("cannot read agent root start-time")
+	}
+	roots := map[Identity]bool{{Pid: rootCmd.Process.Pid, Start: rootStart}: true}
+	waitGone(t, agentChild)
+
+	// The design point, and the staging precondition: a reaped one-shot writer
+	// under the root still classifies Agent.
+	chain, resolved := tr.Lineage(agentChild, roots)
+	if got := Classify(chain, resolved, roots); got != Agent {
+		t.Fatalf("reaped one-shot child of the agent root must classify Agent, got %s (chain %v)", got, chain)
+	}
+
+	// A human shell now forks a child onto that very pid. Nothing in its chain
+	// descends from the agent root.
+	humanCmd, reused := spawnAndReport(t, fmt.Sprintf(
+		"echo %d > /proc/sys/kernel/ns_last_pid; sleep 0.3 & echo $!; wait", agentChild-1))
+	defer func() { humanCmd.Process.Kill(); humanCmd.Wait() }()
+	if reused != agentChild {
+		t.Skipf("allocator handed out pid %d, not the recycled %d (a concurrent fork raced the staging)", reused, agentChild)
+	}
+	waitGone(t, reused)
+
+	chain, resolved = tr.Lineage(reused, roots)
+	got := Classify(chain, resolved, roots)
+	if got == Agent {
+		t.Fatalf("human writer on recycled pid %d inherited the dead agent child's ancestry: classified Agent (chain %v)", reused, chain)
+	}
+	if got != Human {
+		t.Fatalf("the recycled pid's writer descends from a human shell that the scanner saw alive, so it must classify Human, got %s (chain %v resolved %v)", got, chain, resolved)
+	}
+}
+
+// TestDeadWriterCacheExpiresBeforeItCanBeAmbiguous covers the recycling the
+// scanner may never witness: the successor on the reused pid is born and reaped
+// between two scan passes, so the corpse's entry is the ONLY record of that
+// number. Nothing at classification time can tell the two apart, so the entry
+// itself must expire: trusted while the pid was confirmed moments ago (the
+// one-shot writer design point, first half), refused once it is old enough that
+// the allocator could have wrapped and reissued the number (second half).
+func TestDeadWriterCacheExpiresBeforeItCanBeAmbiguous(t *testing.T) {
+	dead := deadPid(t)
+	self := selfIdentity(t)
+	roots := map[Identity]bool{self: true}
+
+	fresh := NewTracker()
+	fresh.mu.Lock()
+	fresh.cache[dead] = procInfo{start: 4242, ppid: os.Getpid(), seen: time.Now()}
+	fresh.mu.Unlock()
+	chain, resolved := fresh.Lineage(dead, roots)
+	if got := Classify(chain, resolved, roots); got != Agent {
+		t.Fatalf("a one-shot agent writer reaped moments ago must still classify Agent, got %s (chain %v)", got, chain)
+	}
+
+	stale := NewTracker()
+	stale.mu.Lock()
+	stale.cache[dead] = procInfo{start: 4242, ppid: os.Getpid(), seen: time.Now().Add(-time.Hour)}
+	stale.mu.Unlock()
+	chain, resolved = stale.Lineage(dead, roots)
+	if got := Classify(chain, resolved, roots); got == Agent {
+		t.Fatalf("ancestry for a pid last confirmed an hour ago is a guess, not evidence: classified Agent (chain %v)", chain)
+	}
+	if start, ok := stale.StartTime(dead); ok {
+		t.Fatalf("a stale corpse must not supply a writer identity either, got start %d", start)
 	}
 }
 

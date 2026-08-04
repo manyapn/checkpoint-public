@@ -1,12 +1,15 @@
 # The checkpoint benchmark
 
-`bench/` answers two questions with numbers instead of adjectives:
+`bench/` answers three questions with numbers instead of adjectives:
 
 1. **Does recovery actually work, repeatedly?** Four destructive scenarios are
    driven through the real binary and scored from real disk state, five rounds
-   each by default.
+   each by default, so a default run is 4 scenarios x 5 rounds = 20 scored
+   rounds (plus 3 x 5 git-shadow rounds).
 2. **What does wrapping a command cost?** Wrapped versus unwrapped, on a
    write-churn workload and again on a realistic compile workload.
+3. **How long does rolling back take?** `checkpoint undo` timed end to end
+   against a stated workload, reported with its sample count and spread.
 
 Three of the four recovery scenarios also run against a **git-shadow baseline**,
 the strongest simple git strategy: a force-add commit at every turn boundary.
@@ -75,6 +78,27 @@ Three rules, enforced in the code rather than promised here:
 - **An errored round scores `recovered: false`, and the report is written
   either way.** A crashed round cannot vanish from the denominator.
 
+## Rollback latency
+
+`undo_ms` is the median wall time of `checkpoint undo`, from fork/exec of the
+binary until it exits. Nothing is subtracted: process start, store open, plan
+build, the pre-undo checkpoint it cuts and every file written back are all
+inside the number. A sample counts only if undo exited 0 *and* every file the
+turn changed was verified back to its seeded bytes, and the report carries the
+achieved sample count rather than the intended one.
+
+The workload travels with the number, because rollback cost scales with the
+size of the turn being reverted: the default is 20 files reverted inside a
+500-file tree, median of 9 samples, with `min_ms` and `max_ms` for the spread.
+`startup_floor_ms` is the same binary run as `checkpoint version`, which touches
+no store at all; it is the exec cost every undo also pays. A quoted rollback
+median close to that floor is a measurement of process launch, not of rollback.
+
+Quote `undo_ms` only together with the workload, the sample count and the
+filesystem. On its own it is not a result.
+
+## Overhead
+
 For overhead, the timed script times *itself* into a nanosecond file rather than
 being wall-clocked from outside. Capture is off the writer's path, so what a
 working agent feels is the writer-visible cost; wall-clocking `run` on a burst
@@ -94,7 +118,8 @@ skipped cleanly, leaving `overhead_realistic_pct` null and a note saying why.
 
 - the four recovery scenarios must be at 100%
 - `us_per_write` must be 25 or less
-- `overhead_pct`, `boundary_ms` and `routine_cut_ms` are reported, not gated
+- `overhead_pct`, `boundary_ms`, `routine_cut_ms` and `undo_ms` are reported,
+  not gated
 
 These are development thresholds for catching a regression between changes.
 They are not a pre-registered benchmark, and the numbers they print are not a
@@ -108,5 +133,5 @@ citeable headline result.
 | `sandbox.go` | one throwaway workspace, store and daemon per round; the fingerprint comparison everything is scored with |
 | `scenarios.go` | the four recovery scenarios |
 | `gitshadow.go` | the git baseline, committed to an external git dir outside the workspace |
-| `overhead.go` | churn overhead, boundary latency, routine checkpoint cost, realistic compile overhead |
+| `overhead.go` | churn overhead, boundary latency, routine checkpoint cost, realistic compile overhead, rollback latency |
 | `accept.sh` | scores a report against the thresholds above |

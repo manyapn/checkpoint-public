@@ -10,10 +10,12 @@ package e2e
 // contents, and the socket inode.
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -351,4 +353,54 @@ func TestDaemonServesOnlyALocalUnixSocket(t *testing.T) {
 	if st := e.StatusJSON(); st.Protected {
 		t.Errorf("status still claims protection after --stop: %+v", st)
 	}
+}
+
+// TestStopMeansStoppedBeforeReturning pins what `protect --stop` promises. It
+// must not return until the daemon process is really gone, because the store
+// locks it holds outlive its socket: the daemon stops answering early in
+// shutdown and only then cuts its final checkpoint and releases the versionlog.
+// A stop that returns on socket silence reports success while the old daemon
+// still holds the lock, so the next `protect` cannot start ("versionlog already
+// locked by another writer"), and `prune`, which requires a stopped daemon,
+// could run against a live one.
+//
+// The workspace is deliberately large: the shutdown checkpoint scans it after
+// the socket closes, which is what makes the gap between "socket silent" and
+// "process gone" wide enough to observe rather than a race that only shows up
+// on a loaded machine.
+func TestStopMeansStoppedBeforeReturning(t *testing.T) {
+	e := newEnv(t)
+	// Written directly rather than through e.Write, which settles after every
+	// file: this tree only needs to exist before protect, not to be observed
+	// write by write.
+	if err := os.MkdirAll(filepath.Join(e.WS, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3000; i++ {
+		p := filepath.Join(e.WS, "src", fmt.Sprintf("f%d.txt", i))
+		if err := os.WriteFile(p, []byte(fmt.Sprintf("content %d\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.Protect()
+
+	b, err := os.ReadFile(filepath.Join(e.Store, "daemon.pid"))
+	if err != nil {
+		t.Fatalf("reading daemon.pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatalf("daemon.pid is not a pid: %q", b)
+	}
+
+	e.StopProtect()
+
+	// Checked with no sleep: any delay here would hide the very window this
+	// test exists to close.
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); err == nil {
+		t.Fatalf("`protect --stop` returned while daemon pid %d is still alive; "+
+			"it still holds the store locks, so the next protect or prune can fail", pid)
+	}
+	// And the practical consequence the user would hit.
+	e.Protect()
 }

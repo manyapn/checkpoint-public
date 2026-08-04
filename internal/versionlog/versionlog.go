@@ -17,7 +17,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -61,6 +65,49 @@ type Log struct {
 	size int64 // byte offset of the valid prefix / append point
 }
 
+// lockWait bounds how long Open waits for the exclusive lock. A daemon that is
+// shutting down still holds this lock while it cuts its final checkpoint and
+// flushes, so a restart can legitimately arrive a moment too early. Waiting
+// briefly turns that overlap into a slightly slower start instead of a failure,
+// while a genuinely concurrent writer still fails, just after this bound.
+const lockWait = 5 * time.Second
+
+// lockWithin takes the exclusive lock, retrying until deadline. The error names
+// the process holding it when that can be determined, because "already locked"
+// with no holder is the least actionable message this program can print.
+func lockWithin(f *os.File, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("versionlog: %s already locked by another writer%s after waiting %s: %w",
+				f.Name(), holderSuffix(f.Name()), wait, err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// holderSuffix names the likely lock holder from the store's daemon.pid, and
+// says whether that process is still alive, so the message points at something
+// the user can act on.
+func holderSuffix(logPath string) string {
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(logPath), "daemon.pid"))
+	if err != nil {
+		return ""
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return ""
+	}
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); err != nil {
+		return fmt.Sprintf(" (daemon.pid names pid %d, which is gone; the lock is held by some other process)", pid)
+	}
+	return fmt.Sprintf(" (held by the daemon at pid %d, which is still running)", pid)
+}
+
 // Open opens (creating if needed) the log at path, takes an exclusive advisory
 // lock, and recovers the longest valid prefix (repairing a torn tail on disk).
 func Open(path string) (*Log, error) {
@@ -68,9 +115,9 @@ func Open(path string) (*Log, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := lockWithin(f, lockWait); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("versionlog: %s already locked by another writer: %w", path, err)
+		return nil, err
 	}
 	recs, valid, err := recoverPrefix(f)
 	if err != nil {

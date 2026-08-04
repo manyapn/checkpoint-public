@@ -1395,6 +1395,17 @@ func cmdTrampoline(args []string) error {
 
 // waitStopped polls /proc until pid reaches the stopped state (the trampoline's
 // self-SIGSTOP has landed).
+// stillRunning reports whether pid is still the process it was when start was
+// read. A pid that vanished, or that now carries a different start-time (the
+// number was reused), is not the daemon any more.
+func stillRunning(pid int, start uint64, haveStart bool) bool {
+	now, ok := provenance.StartTime(pid)
+	if !ok {
+		return false // no /proc entry: the process is gone
+	}
+	return !haveStart || now == start
+}
+
 func waitStopped(pid int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -1662,17 +1673,27 @@ func cmdProtect(args []string) error {
 		if _, err := fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &pid); err != nil || pid <= 0 {
 			return fmt.Errorf("protect --stop: %s is corrupt; stop the daemon manually", pidFile)
 		}
+		// Identify the process before signalling, so a pid recycled during
+		// shutdown cannot be mistaken for the daemon still running.
+		start, haveStart := provenance.StartTime(pid)
 		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return err
 		}
+		// Wait for the PROCESS to exit, not merely for its socket to stop
+		// answering. The daemon closes its listener early in shutdown and then
+		// still cuts a final checkpoint and releases the store locks, so a stop
+		// that returned on socket silence would report success while the old
+		// daemon still held the versionlog lock. The next `protect` would then
+		// fail to start, and `prune`, which requires a stopped daemon, could run
+		// against a live one.
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
-			if _, err := daemon.RequestStatus(sock); err != nil {
+			if !stillRunning(pid, start, haveStart) {
 				os.Remove(pidFile)
 				fmt.Printf("protection stopped for %s\n", root)
 				return nil
 			}
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 		}
 		return fmt.Errorf("protect --stop: daemon (pid %d) did not exit within 10s", pid)
 	}

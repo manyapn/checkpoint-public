@@ -8,7 +8,7 @@
 # The thresholds:
 #   - the four recovery scenarios must score 100%
 #   - us_per_write must be 25 or less
-#   - overhead_pct and boundary_ms are REPORTED, not gated
+#   - overhead_pct, boundary_ms, routine_cut_ms and undo_ms are REPORTED, not gated
 #
 # Reads results/bench.json, which `make bench` produces.
 set -euo pipefail
@@ -36,6 +36,17 @@ gate(agg.get("us_per_write", 1e9) <= 25.0,
 print(f"reported (not gated): overhead_pct={agg.get('overhead_pct')} "
       f"boundary_ms={agg.get('boundary_ms')} routine_cut_ms={agg.get('routine_cut_ms')} "
       f"feed_active={agg.get('feed_active')}")
+
+# Rollback latency, printed with the workload it was measured against and the
+# number of samples behind the median. The millisecond figure on its own means
+# nothing: undo cost scales with the size of the turn being reverted, and the
+# startup floor says how much of it is process launch.
+u = r.get("undo_latency", {})
+print(f"rollback: undo_ms={agg.get('undo_ms')} (median of {agg.get('undo_samples')} "
+      f"samples, spread {u.get('min_ms')}-{u.get('max_ms')} ms, "
+      f"{agg.get('undo_changed_files')} files reverted in a "
+      f"{agg.get('undo_tree_files')}-file tree, "
+      f"startup floor {u.get('startup_floor_ms')} ms)")
 
 # Overhead on the realistic compile workload, against a 5% bar. Informational
 # only: promoting it into the gated set is a one-line change, adding
