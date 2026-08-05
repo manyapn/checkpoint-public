@@ -9,6 +9,7 @@ PREFIX  ?= /usr/local
 DESTDIR ?=
 BINDIR   = $(DESTDIR)$(PREFIX)/bin
 BIN      = bin/checkpoint
+UIBIN    = bin/checkpoint-ui
 
 GO       ?= go
 GOFLAGS  ?=
@@ -28,8 +29,12 @@ BENCH_ROUNDS ?= 5
 
 all: build
 
+# Two binaries on purpose. The interactive screen links Bubble Tea, whose
+# package init queries the terminal and waits out a five second timeout when
+# nothing answers, so keeping it out of the CLI keeps every other command fast.
 build:
 	$(GO) build $(GOFLAGS) -o $(BIN) ./cmd/checkpoint
+	$(GO) build $(GOFLAGS) -o $(UIBIN) ./cmd/checkpoint-ui
 
 # The fanotify-backed tests need CAP_SYS_ADMIN. Without it they skip rather
 # than fail, so a plain `make test` still passes while proving much less. Run
@@ -43,9 +48,10 @@ vet:
 install: build
 	install -d $(BINDIR)
 	install -m 0755 $(BIN) $(BINDIR)/checkpoint
+	install -m 0755 $(UIBIN) $(BINDIR)/checkpoint-ui
 
 uninstall:
-	rm -f $(BINDIR)/checkpoint
+	rm -f $(BINDIR)/checkpoint $(BINDIR)/checkpoint-ui
 
 # The demo starts a real daemon, so it needs root. It runs entirely inside its
 # own throwaway sandbox and leaves the machine unchanged.

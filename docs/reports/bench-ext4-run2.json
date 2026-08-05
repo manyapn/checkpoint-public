@@ -1,0 +1,244 @@
+{
+  "bin": "/tmp/ckreport/ck",
+  "base": "/mnt/ckext4",
+  "rounds": 5,
+  "feed_active": true,
+  "scenarios": [
+    {
+      "name": "rm_rf_restore",
+      "round": 0,
+      "recovered": true
+    },
+    {
+      "name": "transient_salvage",
+      "round": 0,
+      "recovered": true
+    },
+    {
+      "name": "human_preservation",
+      "round": 0,
+      "recovered": true
+    },
+    {
+      "name": "agent_delete_undo",
+      "round": 0,
+      "recovered": true
+    },
+    {
+      "name": "rm_rf_restore",
+      "round": 1,
+      "recovered": true
+    },
+    {
+      "name": "transient_salvage",
+      "round": 1,
+      "recovered": true
+    },
+    {
+      "name": "human_preservation",
+      "round": 1,
+      "recovered": true
+    },
+    {
+      "name": "agent_delete_undo",
+      "round": 1,
+      "recovered": true
+    },
+    {
+      "name": "rm_rf_restore",
+      "round": 2,
+      "recovered": true
+    },
+    {
+      "name": "transient_salvage",
+      "round": 2,
+      "recovered": true
+    },
+    {
+      "name": "human_preservation",
+      "round": 2,
+      "recovered": true
+    },
+    {
+      "name": "agent_delete_undo",
+      "round": 2,
+      "recovered": true
+    },
+    {
+      "name": "rm_rf_restore",
+      "round": 3,
+      "recovered": true
+    },
+    {
+      "name": "transient_salvage",
+      "round": 3,
+      "recovered": true
+    },
+    {
+      "name": "human_preservation",
+      "round": 3,
+      "recovered": true
+    },
+    {
+      "name": "agent_delete_undo",
+      "round": 3,
+      "recovered": true
+    },
+    {
+      "name": "rm_rf_restore",
+      "round": 4,
+      "recovered": true
+    },
+    {
+      "name": "transient_salvage",
+      "round": 4,
+      "recovered": true
+    },
+    {
+      "name": "human_preservation",
+      "round": 4,
+      "recovered": true
+    },
+    {
+      "name": "agent_delete_undo",
+      "round": 4,
+      "recovered": true
+    }
+  ],
+  "git_shadow": [
+    {
+      "name": "git_rm_rf_restore",
+      "round": 0,
+      "recovered": true
+    },
+    {
+      "name": "git_transient",
+      "round": 0,
+      "recovered": false,
+      "detail": "no commit ever saw the transient"
+    },
+    {
+      "name": "git_human_preservation",
+      "round": 0,
+      "recovered": false,
+      "detail": "git has no provenance: reverting the agent reverts the human too"
+    },
+    {
+      "name": "git_rm_rf_restore",
+      "round": 1,
+      "recovered": true
+    },
+    {
+      "name": "git_transient",
+      "round": 1,
+      "recovered": false,
+      "detail": "no commit ever saw the transient"
+    },
+    {
+      "name": "git_human_preservation",
+      "round": 1,
+      "recovered": false,
+      "detail": "git has no provenance: reverting the agent reverts the human too"
+    },
+    {
+      "name": "git_rm_rf_restore",
+      "round": 2,
+      "recovered": true
+    },
+    {
+      "name": "git_transient",
+      "round": 2,
+      "recovered": false,
+      "detail": "no commit ever saw the transient"
+    },
+    {
+      "name": "git_human_preservation",
+      "round": 2,
+      "recovered": false,
+      "detail": "git has no provenance: reverting the agent reverts the human too"
+    },
+    {
+      "name": "git_rm_rf_restore",
+      "round": 3,
+      "recovered": true
+    },
+    {
+      "name": "git_transient",
+      "round": 3,
+      "recovered": false,
+      "detail": "no commit ever saw the transient"
+    },
+    {
+      "name": "git_human_preservation",
+      "round": 3,
+      "recovered": false,
+      "detail": "git has no provenance: reverting the agent reverts the human too"
+    },
+    {
+      "name": "git_rm_rf_restore",
+      "round": 4,
+      "recovered": true
+    },
+    {
+      "name": "git_transient",
+      "round": 4,
+      "recovered": false,
+      "detail": "no commit ever saw the transient"
+    },
+    {
+      "name": "git_human_preservation",
+      "round": 4,
+      "recovered": false,
+      "detail": "git has no provenance: reverting the agent reverts the human too"
+    }
+  ],
+  "overhead": {
+    "files": 2000,
+    "unwrapped_ms": 65,
+    "wrapped_ms": 66,
+    "overhead_pct": 0.9062520910224948,
+    "us_per_write": 0.298,
+    "boundary_ms": 1179,
+    "median_of_runs": 3,
+    "feed_active_env": true,
+    "routine_cut_ms": 27
+  },
+  "overhead_realistic": {
+    "skipped": false,
+    "translation_units": 204,
+    "unwrapped_ms": 3380,
+    "wrapped_ms": 3542,
+    "unwrapped_secs": 3.380326668,
+    "overhead_pct": 4.782832899864576,
+    "median_of_runs": 3
+  },
+  "undo_latency": {
+    "tree_files": 500,
+    "changed_files": 20,
+    "samples": 9,
+    "median_ms": 22.823,
+    "min_ms": 19.748,
+    "max_ms": 38.508,
+    "startup_floor_ms": 2.013
+  },
+  "aggregate": {
+    "agent_delete_undo_pct": 100,
+    "boundary_ms": 1179,
+    "feed_active": true,
+    "git_human_preservation_pct": 0,
+    "git_rm_rf_restore_pct": 100,
+    "git_transient_pct": 0,
+    "human_preservation_pct": 100,
+    "overhead_pct": 0.9062520910224948,
+    "overhead_realistic_pct": 4.782832899864576,
+    "realistic_unwrapped_ms": 3380,
+    "rm_rf_restore_pct": 100,
+    "routine_cut_ms": 27,
+    "transient_salvage_pct": 100,
+    "undo_changed_files": 20,
+    "undo_ms": 22.823,
+    "undo_samples": 9,
+    "undo_tree_files": 500,
+    "us_per_write": 0.298
+  }
+}

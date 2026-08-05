@@ -1,0 +1,29 @@
+checkpoint selftest: 7 checks, 6 passed, 0 failed, 1 skipped (5.7s)
+
+PASS  protection-starts              `protect` confirmed standing protection and the daemon cut setup checkpoint #0 (Recoverable with exceptions) covering the pre-existing tree; change feed unavailable on overlayfs (deletions are not attributed; checkpoints use full scans), complete baseline true; named exceptions on that checkpoint: .env (not captured: looks like credential material (security default)) [expected: selftest's fixture deliberately includes a .env]
+PASS  write-captured-and-restorable  a 30-byte write was captured into checkpoint #1 and restored byte-exact after the file was deleted (notes/keep.md)
+PASS  rm-rf-disaster-restore         `rm -rf` of the whole workspace, then `restore 0`, reproduced all 10 entries byte-exact (content, permission bits, exec bits, symlink targets and empty directories)
+PASS  transient-salvage              tmp/transient.txt was created, closed and deleted without ever appearing in a checkpoint; `recover --to` returned its 46 bytes byte-exact
+PASS  agent-undo-preserves-human     during one wrapped agent turn the agent edited agent.txt and a separate human process concurrently edited human.txt; `undo` reverted agent.txt to its baseline (checkpoint 3) and left human.txt untouched
+SKIP  agent-delete-undone            not tested: the dirent change feed is unavailable on this workspace's filesystem (overlayfs), and delete attribution is feed-scoped. Deletions carry no provenance here, so `undo` cannot know an agent deleted a file. Restore-by-checkpoint still brings deleted files back (covered by rm-rf-disaster-restore). To exercise this guarantee, put the project on ext4/xfs/btrfs; in a container, bind-mount it from the host instead of working on the container's overlay layer.
+PASS  secrets-never-captured         a .env holding a unique marker was written before and during protection; the marker appears nowhere under /tmp/ckoverlay/.checkpoint-selftest-2638264980/stores/primary (23 store files searched, compressed objects decompressed and searched too), while the control marker from README.md was found in 1, which proves the search really does see stored content
+
+Environment
+  arch            arm64
+  binary          /tmp/ckreport/ck
+  container_hint  docker (/.dockerenv present)
+  cpus            10
+  distro          Debian GNU/Linux 12 (bookworm)
+  feed_active     false
+  kernel          6.12.76-linuxkit (#1 SMP Fri Apr 17 14:56:37 UTC 2026)
+  os              linux
+  root            true
+  store_fs        overlayfs
+  store_path      /tmp/ckoverlay/.checkpoint-selftest-2638264980/stores/primary
+  uid             0
+  version         ck commit: f07cd88398dfc8fa0039180df33e94db6dfa5051 commit time: 2026-08-04T19:25:52Z go: go1.24.13 (compare `commit` against the revision you expect to be testing)
+  workspace_fs    overlayfs
+  workspace_path  /tmp/ckoverlay/.checkpoint-selftest-2638264980/project
+
+VERDICT: every guarantee that applies to this machine held (6 of 7).
+That is a property of this environment, not a failure: 1 check could not be tested here and is explained above as SKIP.

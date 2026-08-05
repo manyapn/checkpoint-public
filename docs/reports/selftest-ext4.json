@@ -1,0 +1,58 @@
+{
+  "results": [
+    {
+      "name": "protection-starts",
+      "status": "pass",
+      "detail": "`protect` confirmed standing protection and the daemon cut setup checkpoint #0 (Recoverable with exceptions) covering the pre-existing tree; change feed ACTIVE on ext2/ext3/ext4 (deletions are attributed; checkpoints scale with changes), complete baseline true; named exceptions on that checkpoint: .env (not captured: looks like credential material (security default)) [expected: selftest's fixture deliberately includes a .env]"
+    },
+    {
+      "name": "write-captured-and-restorable",
+      "status": "pass",
+      "detail": "a 30-byte write was captured into checkpoint #1 and restored byte-exact after the file was deleted (notes/keep.md)"
+    },
+    {
+      "name": "rm-rf-disaster-restore",
+      "status": "pass",
+      "detail": "`rm -rf` of the whole workspace, then `restore 0`, reproduced all 10 entries byte-exact (content, permission bits, exec bits, symlink targets and empty directories)"
+    },
+    {
+      "name": "transient-salvage",
+      "status": "pass",
+      "detail": "tmp/transient.txt was created, closed and deleted without ever appearing in a checkpoint; `recover --to` returned its 46 bytes byte-exact"
+    },
+    {
+      "name": "agent-undo-preserves-human",
+      "status": "pass",
+      "detail": "during one wrapped agent turn the agent edited agent.txt and a separate human process concurrently edited human.txt; `undo` reverted agent.txt to its baseline (checkpoint 3) and left human.txt untouched"
+    },
+    {
+      "name": "agent-delete-undone",
+      "status": "pass",
+      "detail": "a wrapped agent deleted doomed.txt; `undo` recognised the deletion as the agent's (change feed active) and restored the file byte-exact from checkpoint 6"
+    },
+    {
+      "name": "secrets-never-captured",
+      "status": "pass",
+      "detail": "a .env holding a unique marker was written before and during protection; the marker appears nowhere under /mnt/ckext4/.checkpoint-selftest-3988644574/stores/primary (27 store files searched, compressed objects decompressed and searched too), while the control marker from README.md was found in 1, which proves the search really does see stored content"
+    }
+  ],
+  "env": {
+    "arch": "arm64",
+    "binary": "/tmp/ckreport/ck",
+    "container_hint": "docker (/.dockerenv present)",
+    "cpus": "10",
+    "distro": "Debian GNU/Linux 12 (bookworm)",
+    "feed_active": "true",
+    "kernel": "6.12.76-linuxkit (#1 SMP Fri Apr 17 14:56:37 UTC 2026)",
+    "os": "linux",
+    "root": "true",
+    "store_fs": "ext2/ext3/ext4",
+    "store_path": "/mnt/ckext4/.checkpoint-selftest-3988644574/stores/primary",
+    "uid": "0",
+    "version": "ck commit: f07cd88398dfc8fa0039180df33e94db6dfa5051 commit time: 2026-08-04T19:25:52Z go: go1.24.13 (compare `commit` against the revision you expect to be testing)",
+    "workspace_fs": "ext2/ext3/ext4",
+    "workspace_path": "/mnt/ckext4/.checkpoint-selftest-3988644574/project"
+  },
+  "started_ns": 1785873163985684875,
+  "ended_ns": 1785873170970707211
+}

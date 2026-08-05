@@ -1,0 +1,44 @@
+bash bench/accept.sh <report>, scored on the committed reports in docs/reports/
+checkpoint f07cd88, 2026-08-04, same machine as env.txt
+
+--- bench-ext4-run1.json ---
+reported (not gated): overhead_pct=-18.818702198143903 boundary_ms=1183 routine_cut_ms=32 feed_active=True
+rollback: undo_ms=25.338 (median of 9 samples, spread 19.952-923.134 ms, 20 files reverted in a 500-file tree, startup floor 1.594 ms)
+realistic overhead 10.66% (unwrapped 3126 ms) vs the 5% bar: EXCEEDED
+ACCEPT PASS (development thresholds only, not a headline benchmark)
+exit=0
+
+--- bench-ext4-run2.json ---
+reported (not gated): overhead_pct=0.9062520910224948 boundary_ms=1179 routine_cut_ms=27 feed_active=True
+rollback: undo_ms=22.823 (median of 9 samples, spread 19.748-38.508 ms, 20 files reverted in a 500-file tree, startup floor 2.013 ms)
+realistic overhead 4.78% (unwrapped 3380 ms) vs the 5% bar: OK
+ACCEPT PASS (development thresholds only, not a headline benchmark)
+exit=0
+
+--- bench-ext4-run3.json ---
+reported (not gated): overhead_pct=-25.796574407465755 boundary_ms=1219 routine_cut_ms=34 feed_active=True
+rollback: undo_ms=22.086 (median of 9 samples, spread 20.247-31.537 ms, 20 files reverted in a 500-file tree, startup floor 5.882 ms)
+realistic overhead -22.63% (unwrapped 3910 ms) vs the 5% bar: OK
+ACCEPT PASS (development thresholds only, not a headline benchmark)
+exit=0
+
+--- bench-ext4-run4.json ---
+reported (not gated): overhead_pct=332.520693756724 boundary_ms=1616 routine_cut_ms=41 feed_active=True
+rollback: undo_ms=23.923 (median of 9 samples, spread 20.618-31.025 ms, 20 files reverted in a 500-file tree, startup floor 1.665 ms)
+realistic overhead -31.54% (unwrapped 2103 ms) vs the 5% bar: OK
+ACCEPT FAIL: us_per_write 87.219 > 25
+exit=1
+
+--- bench-ext4-run5.json ---
+reported (not gated): overhead_pct=-1.0426211513513282 boundary_ms=1188 routine_cut_ms=34 feed_active=True
+rollback: undo_ms=23.186 (median of 9 samples, spread 21.67-88.541 ms, 20 files reverted in a 500-file tree, startup floor 1.544 ms)
+realistic overhead 4.14% (unwrapped 2678 ms) vs the 5% bar: OK
+ACCEPT PASS (development thresholds only, not a headline benchmark)
+exit=0
+
+--- bench-overlayfs.json ---
+reported (not gated): overhead_pct=-14.164447064729329 boundary_ms=1253 routine_cut_ms=40 feed_active=False
+rollback: undo_ms=26.584 (median of 9 samples, spread 21.436-70.513 ms, 20 files reverted in a 500-file tree, startup floor 1.583 ms)
+realistic overhead 16.79% (unwrapped 2896 ms) vs the 5% bar: EXCEEDED
+ACCEPT FAIL: agent_delete_undo_pct 0 != 100
+exit=1

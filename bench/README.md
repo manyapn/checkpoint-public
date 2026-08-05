@@ -131,6 +131,36 @@ skipped cleanly, leaving `overhead_realistic_pct` null and a note saying why.
 - `overhead_pct`, `boundary_ms`, `routine_cut_ms` and `undo_ms` are reported,
   not gated
 
+### The 25 us per write threshold is a tripwire, not a measurement
+
+Say it plainly, because it is the easiest number in this repo to misread:
+
+> **25 us per write is a regression gate. It is not a performance claim, it is
+> not a measured result, and it must not be quoted as one.** It means "if this
+> jumps, someone put work on the writer's path". A passing run says the writer
+> path did not get worse. It does not say recording costs 25 us, or 5 us, or
+> any other number.
+
+The same goes for the 5% bar on `overhead_realistic_pct`, which `accept.sh`
+prints as OK or EXCEEDED and does not gate at all.
+
+There is measured evidence for why this matters, committed in
+[`docs/reports/`](../docs/reports/). Five identical runs on one machine, one
+commit, no code change between them, returned `us_per_write` of -12.74, -9.25,
+-0.42, +0.30 and +87.22, and the gate passed four times and failed once. Three
+of the five came back negative, which is not a speedup: the wrapped and
+unwrapped sides of the churn workload differ by a few tens of milliseconds
+spread over 2000 writes, so a millisecond of scheduler noise moves the result by
+0.5 us per write. On that machine the honest statement about recording cost is
+"below the noise floor of the measurement", not a figure.
+
+A threshold a stationary system crosses one run in five is coarser than its own
+measurement. That is fine for a tripwire and disqualifying for a headline.
+
+If you want a number to quote, quote the recovery columns (they are counts of
+rounds, not timings), or run the benchmark on hardware you control and publish
+the spread the way `docs/reports/README.md` does.
+
 These are development thresholds for catching a regression between changes.
 They are not a pre-registered benchmark, and the numbers they print are not a
 citeable headline result.

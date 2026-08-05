@@ -1,0 +1,28 @@
+checkpoint selftest: 7 checks, 7 passed, 0 failed, 0 skipped (6.9s)
+
+PASS  protection-starts              `protect` confirmed standing protection and the daemon cut setup checkpoint #0 (Recoverable with exceptions) covering the pre-existing tree; change feed ACTIVE on ext2/ext3/ext4 (deletions are attributed; checkpoints scale with changes), complete baseline true; named exceptions on that checkpoint: .env (not captured: looks like credential material (security default)) [expected: selftest's fixture deliberately includes a .env]
+PASS  write-captured-and-restorable  a 30-byte write was captured into checkpoint #1 and restored byte-exact after the file was deleted (notes/keep.md)
+PASS  rm-rf-disaster-restore         `rm -rf` of the whole workspace, then `restore 0`, reproduced all 10 entries byte-exact (content, permission bits, exec bits, symlink targets and empty directories)
+PASS  transient-salvage              tmp/transient.txt was created, closed and deleted without ever appearing in a checkpoint; `recover --to` returned its 46 bytes byte-exact
+PASS  agent-undo-preserves-human     during one wrapped agent turn the agent edited agent.txt and a separate human process concurrently edited human.txt; `undo` reverted agent.txt to its baseline (checkpoint 3) and left human.txt untouched
+PASS  agent-delete-undone            a wrapped agent deleted doomed.txt; `undo` recognised the deletion as the agent's (change feed active) and restored the file byte-exact from checkpoint 6
+PASS  secrets-never-captured         a .env holding a unique marker was written before and during protection; the marker appears nowhere under /mnt/ckext4/.checkpoint-selftest-2950688360/stores/primary (27 store files searched, compressed objects decompressed and searched too), while the control marker from README.md was found in 1, which proves the search really does see stored content
+
+Environment
+  arch            arm64
+  binary          /tmp/ckreport/ck
+  container_hint  docker (/.dockerenv present)
+  cpus            10
+  distro          Debian GNU/Linux 12 (bookworm)
+  feed_active     true
+  kernel          6.12.76-linuxkit (#1 SMP Fri Apr 17 14:56:37 UTC 2026)
+  os              linux
+  root            true
+  store_fs        ext2/ext3/ext4
+  store_path      /mnt/ckext4/.checkpoint-selftest-2950688360/stores/primary
+  uid             0
+  version         ck commit: f07cd88398dfc8fa0039180df33e94db6dfa5051 commit time: 2026-08-04T19:25:52Z go: go1.24.13 (compare `commit` against the revision you expect to be testing)
+  workspace_fs    ext2/ext3/ext4
+  workspace_path  /mnt/ckext4/.checkpoint-selftest-2950688360/project
+
+VERDICT: every guarantee held on this machine.
