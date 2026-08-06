@@ -4,14 +4,14 @@
 
 **Version control built for long-running agent sessions.**
 
-Git assumes a person decides when a unit of work is finished, and writes it down. That holds for humans. It breaks the moment an agent works on its own for hours.
+Git assumes a person decides when a unit of work is finished, and commits it. That works for humans, but not for an agent that works on its own for hours.
 
-- a usable timeline would mean committing CONSTANTLY, and the history becomes noise you have to clean up before anyone can read it
-- git records an author per commit, not per change, so inside one working tree it cannot tell the agent's edits from the ones you made alongside them
-- a file the agent created and deleted between two commits never existed, as far as git is concerned
+- A usable timeline would mean committing CONSTANTLY, and the history becomes noise you have to clean up before anyone can read it
+- Git records an author per commit, not per change, so inside one working tree it cannot tell the agent's edits from the ones you made alongside them
+- A file the agent created and deleted between two commits never existed, as far as git is concerned
 - `git checkout .` to undo the agent throws away what you wrote in the same window
 
-checkpoint keeps a second history underneath the one you publish. 
+Checkpoint keeps a second history underneath the one you publish. 
 
 It commits itself, it knows who wrote each file, and it never touches your git history. 
 
