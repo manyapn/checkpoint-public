@@ -63,10 +63,15 @@ type Version struct {
 
 // Log is the append-only salvage version log. Single-writer: a second Open of the
 // same file fails while the first holds it.
+//
+// The on-disk file is the authoritative record; the Log deliberately keeps NO
+// in-memory copy of it. An always-on daemon appends for the life of a session,
+// and mirroring every record in memory grew without bound while duplicating
+// what the file already holds (readers such as undo and recover have always
+// gone through Read, against the file).
 type Log struct {
 	mu   sync.Mutex
 	f    *os.File
-	recs []Version
 	size int64 // byte offset of the valid prefix / append point
 }
 
@@ -124,7 +129,7 @@ func Open(path string) (*Log, error) {
 		f.Close()
 		return nil, err
 	}
-	recs, valid, err := recoverPrefix(f)
+	_, valid, err := recoverPrefix(f)
 	if err != nil {
 		unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		f.Close()
@@ -142,7 +147,7 @@ func Open(path string) (*Log, error) {
 		f.Close()
 		return nil, err
 	}
-	return &Log{f: f, recs: recs, size: valid}, nil
+	return &Log{f: f, size: valid}, nil
 }
 
 // recoverPrefix reads f and returns the records of the longest valid prefix plus
@@ -206,17 +211,22 @@ func (l *Log) Append(v Version) error {
 		return fmt.Errorf("versionlog: short write %d/%d", n, len(b))
 	}
 	l.size += int64(n)
-	l.recs = append(l.recs, v)
 	return nil
 }
 
-// Versions returns all appended versions, oldest first (a copy).
+// Versions returns the log's versions, oldest first, re-read from the
+// authoritative on-disk file (recovered prefix plus everything appended by
+// this writer, which is exactly what the file's valid prefix holds under the
+// single-writer lock). Nil on a read failure. Callers use it for a one-shot
+// summary or a test assertion, never on the capture hot path.
 func (l *Log) Versions() []Version {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	out := make([]Version, len(l.recs))
-	copy(out, l.recs)
-	return out
+	recs, _, err := recoverPrefix(l.f)
+	if err != nil {
+		return nil
+	}
+	return recs
 }
 
 // Sync flushes the log to disk (call at checkpoint boundaries).
