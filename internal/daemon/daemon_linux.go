@@ -261,20 +261,31 @@ func (s *server) dirtyPaths() int {
 	return n
 }
 
+// windowHasActivity reports whether the current window carries any signal a
+// checkpoint could record: a captured version, a dirty feed path, a bounded
+// per-file miss, or an overflow on either fanotify group (an overflowed window
+// may hide changes, so it counts as activity). This is THE emptiness predicate:
+// cut's skip-empty rule negates it and maybeAutosave uses it directly in feed
+// mode, so a new loss signal added here reaches both, and neither can drift
+// from the other.
+func (s *server) windowHasActivity() bool {
+	return s.captured > 0 || s.dirtyPaths() > 0 || s.w.Missed() > 0 ||
+		feedOverflowed(s.feed) || overflowCheck(s.w)
+}
+
 // maybeAutosave cuts an "autosave" checkpoint (no settle) when an agent session
 // is registered, the last completed cut is older than autosaveInterval, and the
-// window is non-empty. Non-empty mirrors the skip-empty rule inverted; in scan
-// mode it means >=1 captured version since the last cut (deletes are invisible
-// there, but a captured write is proof enough of change). Never fires with no
-// session; the timer resets on every cut of any kind.
+// window is non-empty (windowHasActivity, the same signals cut's skip-empty rule
+// negates); in scan mode non-empty means >=1 captured version since the last cut
+// (deletes are invisible there, but a captured write is proof enough of change).
+// Never fires with no session; the timer resets on every cut of any kind.
 func (s *server) maybeAutosave() {
 	if s.w.AgentSessionCount() == 0 || time.Since(s.lastCut) <= autosaveInterval {
 		return
 	}
 	nonEmpty := s.captured > 0
 	if s.feed != nil {
-		nonEmpty = nonEmpty || s.dirtyPaths() > 0 || s.w.Missed() > 0 ||
-			feedOverflowed(s.feed) || overflowCheck(s.w)
+		nonEmpty = s.windowHasActivity()
 	}
 	if !nonEmpty {
 		return
@@ -452,17 +463,17 @@ func (s *server) handleBoundary(req Request) Response {
 func (s *server) cut(source, name string, timedOut bool, cadence bool) Response {
 	s.drain() // the emptiness check and the fold must both see everything queued
 	s.drainFeed()
-	// Skip-empty: no new manifest when the window is PROVABLY empty, meaning
-	// feed active with no overflow (capture overflow included: an overflowed
-	// window may hide changes), zero captured versions, zero dirty paths, and
-	// zero misses, with the existing latest DURABLE (a PARTIAL prev makes no
-	// coverage claim to point back to; setup-rescans must land a real cut).
-	// Scan mode never skips: deletes are invisible to capture, so emptiness
-	// cannot be proven. A named request never skips either, because the user
-	// asked for THIS moment under that name.
+	// Skip-empty: no new manifest when the window is PROVABLY empty — no
+	// activity signal at all (!windowHasActivity: zero captured versions, zero
+	// dirty paths, zero misses, no overflow on either group; an overflowed
+	// window may hide changes), with the feed active and the existing latest
+	// DURABLE (a PARTIAL prev makes no coverage claim to point back to;
+	// setup-rescans must land a real cut). Scan mode never skips: deletes are
+	// invisible to capture, so emptiness cannot be proven. A named request
+	// never skips either, because the user asked for THIS moment under that
+	// name.
 	if name == "" && s.feed != nil && s.prev != nil && s.prev.Coverage == store.DURABLE &&
-		!feedOverflowed(s.feed) && !overflowCheck(s.w) &&
-		s.captured == 0 && s.dirtyPaths() == 0 && s.w.Missed() == 0 {
+		!s.windowHasActivity() {
 		return Response{ID: s.prev.ID, Coverage: string(s.prev.Coverage),
 			Entries: len(s.prev.Entries), SkippedEmpty: true}
 	}
