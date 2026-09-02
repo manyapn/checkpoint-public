@@ -30,6 +30,7 @@ import (
 
 	"github.com/manyapn/checkpoint-public/internal/objstore"
 	"github.com/manyapn/checkpoint-public/internal/oplog"
+	"github.com/manyapn/checkpoint-public/internal/provenance"
 	"github.com/manyapn/checkpoint-public/internal/store"
 	"github.com/manyapn/checkpoint-public/internal/versionlog"
 )
@@ -101,15 +102,18 @@ func BuildPlan(baseline *store.Manifest, window []versionlog.Version, root strin
 			a = &acc{}
 			byRel[rel] = a
 		}
+		// The ledger's writer vocabulary is owned by provenance.Class.String():
+		// capture writes these strings, so this switch compares against the same
+		// authority rather than a local mirror that could drift from it.
 		switch v.Writer {
-		case agentWriter:
+		case provenance.Agent.String():
 			a.agent = true
-		case selfWriter:
+		case provenance.Self.String():
 			// Checkpoint's OWN restore/undo write. Not the agent's change and
 			// not the human's: counting it as "other" would conflict the very
 			// file a previous `undo --only` just reverted, making selective
 			// undo one-shot (a file could never be addressed again).
-		case humanWriter:
+		case provenance.Human.String():
 			a.human = true
 		default:
 			// Unknown or unattributed. Treated exactly like a human write for
@@ -180,16 +184,6 @@ func BuildPlan(baseline *store.Manifest, window []versionlog.Version, root strin
 	}
 	return p
 }
-
-const (
-	agentWriter = "agent"
-	// humanWriter matches provenance.Human.String(): a write attributed to a
-	// process outside every registered agent tree.
-	humanWriter = "human"
-	// selfWriter matches provenance.Self.String(): a write made by checkpoint
-	// itself while restoring or undoing.
-	selfWriter = "checkpoint"
-)
 
 // Apply executes the plan against the workspace. The caller must have already
 // snapshotted the present (auto-checkpoint-first) so this is undoable. Restores
