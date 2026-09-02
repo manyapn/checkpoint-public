@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -125,4 +126,29 @@ func ensureParentNoFollow(dst string) error {
 		}
 	}
 	return nil
+}
+
+// ErrSymlinkRoot marks a refusal to treat a SYMLINK as a protected/restore root.
+// filepath.WalkDir on a symlink visits only the link itself, so a symlinked root
+// would snapshot ZERO entries and then be badged "Fully recoverable", the worst
+// possible outcome (a confident green label over an empty checkpoint). This
+// layer must never lie, so it refuses and names the resolved path to use
+// instead; resolving roots for the user is the CLI's job, not the store's.
+var ErrSymlinkRoot = errors.New("root is a symlink")
+
+// checkNotSymlinkRoot refuses root when it is a symlink. what is the role of
+// the path in the message ("protected root" / "restore target"). A root that
+// does not exist is not this check's problem: the walk (or the restore's
+// MkdirAll) reports it.
+func checkNotSymlinkRoot(what, root string) error {
+	fi, err := os.Lstat(root)
+	if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+		return nil
+	}
+	hint := "pass the resolved path instead"
+	if resolved, rerr := filepath.EvalSymlinks(root); rerr == nil {
+		hint = fmt.Sprintf("pass the resolved path instead (%s)", resolved)
+	}
+	return fmt.Errorf("refusing %s %s: %w, and a symlink root captures nothing while still being badged recoverable; %s",
+		what, root, ErrSymlinkRoot, hint)
 }
