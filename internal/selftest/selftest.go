@@ -52,6 +52,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/manyapn/checkpoint-public/internal/daemon"
 )
 
 // Status values for Result.Status. They are part of the JSON contract a bug
@@ -1263,11 +1265,13 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// socketPathFits mirrors the CLI's own sockaddr_un guard, so selftest fails with
-// a sentence instead of a bind() errno.
+// socketPathFits answers the CLI's own sockaddr_un guard, so selftest fails with
+// a sentence instead of a bind() errno. The socket path and limit come from the
+// daemon package (pure path derivation, no runtime behavior): selftest still
+// exercises the binary black-box, but must never drift from the actual socket
+// layout the daemon binds.
 func socketPathFits(storeDir string) bool {
-	const sunPathMax = 108
-	return len(filepath.Join(storeDir, "daemon.sock"))+1 <= sunPathMax
+	return len(daemon.SocketPath(storeDir))+1 <= daemon.SunPathMax
 }
 
 func orUnknown(s string) string {

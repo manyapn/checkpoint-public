@@ -22,8 +22,17 @@ import (
 	"time"
 )
 
-// SocketPath is the daemon's Unix socket for a given store dir.
+// SocketPath is the daemon's Unix socket for a given store dir. It is the ONE
+// place the socket's name and location are derived; every guard that reasons
+// about the socket path (the CLI's up-front refusal, selftest's scratch-dir
+// fallback) must build on it rather than re-deriving the layout.
 func SocketPath(storeDir string) string { return filepath.Join(storeDir, "daemon.sock") }
+
+// SunPathMax is the kernel's sockaddr_un.sun_path capacity, including the
+// terminating NUL. A socket path of len(path)+1 > SunPathMax fails inside
+// bind(2) with a bare "invalid argument", so callers check it up front and
+// refuse (or relocate) with an explanation instead.
+const SunPathMax = 108
 
 // Request is a daemon request.
 //   - "checkpoint": settle + cut a checkpoint (Source labels it; Name, when set,
