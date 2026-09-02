@@ -172,13 +172,6 @@ var (
 	walkBudget     = 2 * time.Second
 )
 
-// walkSkip mirrors the store's bulk-exclusion list: these directories are never
-// captured, so counting them would misreport how much work checkpoint has to do.
-var walkSkip = map[string]bool{
-	".git": true, "node_modules": true, "build": true, "target": true,
-	"dist": true, "__pycache__": true, ".venv": true,
-}
-
 func workspaceCheck(ws string, wsErr error) Check {
 	c := Check{Name: "workspace", Fatal: true}
 	if wsErr != nil {
@@ -249,7 +242,10 @@ func walkSize(root string) (files int, bytes int64, unreadable int, capped bool)
 			return nil
 		}
 		if d.IsDir() {
-			if path != root && walkSkip[d.Name()] {
+			// Bulk-excluded directories are never captured (store owns that
+			// list), so counting them would misreport how much work checkpoint
+			// has to do.
+			if path != root && store.IsBulkExcluded(d.Name()) {
 				return fs.SkipDir
 			}
 			return nil

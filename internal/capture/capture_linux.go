@@ -78,17 +78,6 @@ type Watcher struct {
 // keeps counting).
 const maxOutsideListed = 20
 
-// bulkExcludes is the default-skip list of rebuildable directories (protect
-// meaningful work, not regenerable bulk), plus .git. Matched as path COMPONENTS
-// relative to the protected root, never as substrings of the absolute path:
-// these names are only meaningful inside the workspace, and a workspace that
-// happens to live under a directory of the same name (~/build/proj) is an
-// ordinary project. Mirrors store.defaultExcludes, which governs the scan path.
-var bulkExcludes = map[string]bool{
-	".git": true, "node_modules": true, "build": true, "target": true,
-	"dist": true, "__pycache__": true, ".venv": true,
-}
-
 // New opens the store + version log and arms a fanotify mount mark for
 // FAN_CLOSE_WRITE over the workspace and each extra protected folder. A mount
 // mark (not per-dir) is used so a file created in a subdirectory made mid-run is
@@ -449,7 +438,8 @@ func (w *Watcher) protected(path string) bool {
 	return ok
 }
 
-// excluded reports whether path lives under a bulk-excluded directory. The
+// excluded reports whether path lives under a bulk-excluded directory (the
+// store package owns WHICH names are excluded; store.IsBulkExcluded). The
 // decision is made on the path RELATIVE to its protected root: comparing
 // against the absolute path would exclude every file in a workspace whose own
 // parent directory is named build/dist/target/.git, leaving the user entirely
@@ -462,7 +452,7 @@ func (w *Watcher) excluded(path string) bool {
 	}
 	segs := strings.Split(path[len(root)+1:], "/")
 	for _, seg := range segs[:len(segs)-1] {
-		if bulkExcludes[seg] {
+		if store.IsBulkExcluded(seg) {
 			return true
 		}
 	}
