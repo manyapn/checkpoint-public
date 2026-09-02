@@ -116,7 +116,7 @@ func cmdRestore(args []string) error {
 			if err != nil {
 				return err
 			}
-			p.Source = "pre-restore"
+			p.Source = sourcePreRestore
 			switch err := store.Write(storeDir, p); {
 			case err == nil:
 				pre = p

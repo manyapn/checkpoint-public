@@ -217,7 +217,7 @@ func cmdUndo(args []string) error {
 			if err != nil {
 				return err
 			}
-			m.Source = "pre-undo"
+			m.Source = sourcePreUndo
 			switch err := store.Write(storeDir, m); {
 			case err == nil:
 				present = m
@@ -368,10 +368,21 @@ func manifestBelow(storeDir string, id int) (*store.Manifest, bool) {
 	return nil, false
 }
 
+// Bookkeeping checkpoint sources: manifests checkpoint cuts to record what IT
+// was about to do, never turns someone performed. The values are persisted
+// semantics (old manifests carry these literals), so they must not change; the
+// constants exist so the writers and isBookkeeping share one definition — a
+// typo in a writer would otherwise silently turn a bookkeeping cut into a
+// "turn" that undo then targets.
+const (
+	sourcePreUndo    = "pre-undo"
+	sourcePreRestore = "pre-restore"
+)
+
 // isBookkeeping reports whether a checkpoint records what checkpoint itself was
 // about to do, rather than work someone did.
 func isBookkeeping(source string) bool {
-	return source == "pre-undo" || source == "pre-restore"
+	return source == sourcePreUndo || source == sourcePreRestore
 }
 
 // reportUnattributableDeletions surfaces files that exist in the target
