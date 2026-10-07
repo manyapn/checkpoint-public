@@ -225,6 +225,23 @@ func (s *server) cut(source, name string, settleTimedOut bool) Result {
 	if name == "" && s.changes != nil && s.prev != nil && !s.activity() {
 		return Result{ID: s.prev.ID, Badge: s.prev.Badge(), Entries: len(s.prev.Entries), Skipped: true}
 	}
+	c, err := s.record()
+	if err != nil {
+		return Result{Error: err.Error()}
+	}
+	c.Source, c.Name, c.SettleTimedOut = source, name, settleTimedOut
+	if err := snapshot.Commit(s.cfg.StoreDir, c); err != nil {
+		return Result{Error: err.Error()}
+	}
+	s.rec.log.Sync()
+	s.startWindow(c)
+	return Result{ID: c.ID, Badge: c.Badge(), Entries: len(c.Entries), SettleTimedOut: settleTimedOut}
+}
+
+// record builds the checkpoint: a fold over the change set when the feed
+// is live and complete, a full scan otherwise. What this window could not
+// capture is stamped on it.
+func (s *server) record() (*snapshot.Checkpoint, error) {
 	var c *snapshot.Checkpoint
 	var err error
 	if s.changes != nil && !s.changes.Overflowed && s.prev != nil {
@@ -237,18 +254,19 @@ func (s *server) cut(source, name string, settleTimedOut bool) Result {
 		c, err = snapshot.Scan(s.cfg.Root, s.rec.objs, s.prev)
 	}
 	if err != nil {
-		return Result{Error: err.Error()}
+		return nil, err
 	}
-	c.Source, c.Name, c.SettleTimedOut = source, name, settleTimedOut
 	c.EventsDropped = s.writes.Overflowed
 	for _, p := range s.rec.missed {
 		rel, _ := filepath.Rel(s.cfg.Root, p)
 		c.Exceptions = append(c.Exceptions, snapshot.Exception{Path: rel, Reason: "write not captured"})
 	}
-	if err := snapshot.Commit(s.cfg.StoreDir, c); err != nil {
-		return Result{Error: err.Error()}
-	}
-	s.rec.log.Sync()
+	return c, nil
+}
+
+// startWindow makes c the base for the next checkpoint and clears every
+// per-window counter.
+func (s *server) startWindow(c *snapshot.Checkpoint) {
 	s.prev = c
 	s.captured, s.dirty, s.rec.missed = 0, map[string]bool{}, nil
 	s.writes.Overflowed = false
@@ -256,5 +274,4 @@ func (s *server) cut(source, name string, settleTimedOut bool) Result {
 		s.changes.Overflowed = false
 	}
 	s.lastCut = time.Now()
-	return Result{ID: c.ID, Badge: c.Badge(), Entries: len(c.Entries), SettleTimedOut: settleTimedOut}
 }

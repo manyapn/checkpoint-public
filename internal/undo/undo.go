@@ -56,6 +56,26 @@ func Turn(storeDir string) (turn, baseline *snapshot.Checkpoint, err error) {
 	return turn, nil, nil
 }
 
+// Window returns every recorded write since the baseline checkpoint: the
+// writes the latest turn is made of.
+func Window(storeDir string, baseline *snapshot.Checkpoint) ([]writelog.Entry, error) {
+	since := int64(0)
+	if baseline != nil {
+		since = baseline.TimeNS
+	}
+	writes, err := writelog.Read(filepath.Join(storeDir, snapshot.LogFile))
+	if err != nil {
+		return nil, err
+	}
+	var window []writelog.Entry
+	for _, w := range writes {
+		if w.TimeNS > since {
+			window = append(window, w)
+		}
+	}
+	return window, nil
+}
+
 // Plan decides, per path written since the baseline, what undo will do.
 // only limits the plan to those relative paths.
 func Plan(baseline *snapshot.Checkpoint, window []writelog.Entry, root string, only []string) []Step {

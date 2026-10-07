@@ -102,43 +102,48 @@ func (c *Changes) Drain() []Change {
 	}
 }
 
+// decode turns one kernel record into the changes it describes. A rename
+// carries both names, so it yields two.
 func (c *Changes) decode(mask uint64, pid int, rec []byte) []Change {
+	infos := parseInfo(rec)
 	isDir := mask&unix.FAN_ONDIR != 0
 	var out []Change
-	emit := func(op string, infoType byte) {
-		for _, in := range parseInfo(rec) {
-			if in.kind != infoType || in.name == "" {
-				continue
-			}
-			dir, ok := c.resolveDir(in.handleType, in.handle)
-			if !ok {
-				c.Overflowed = true
-				continue
-			}
-			path := filepath.Join(dir, in.name)
-			if path != c.root && !strings.HasPrefix(path, c.root+"/") {
-				continue
-			}
-			if isDir {
-				c.dirs = map[string]string{} // a moved dir invalidates cached paths
-			}
-			out = append(out, Change{op, path, pid, isDir})
-		}
+	if mask&fanRename != 0 {
+		out = append(out, c.named(RenamedFrom, infoOldName, infos, pid, isDir)...)
+		return append(out, c.named(RenamedTo, infoNewName, infos, pid, isDir)...)
 	}
-	switch {
-	case mask&fanRename != 0:
-		emit(RenamedFrom, infoOldName)
-		emit(RenamedTo, infoNewName)
-	default:
-		if mask&unix.FAN_CREATE != 0 {
-			emit(Created, infoDirName)
+	if mask&unix.FAN_CREATE != 0 {
+		out = append(out, c.named(Created, infoDirName, infos, pid, isDir)...)
+	}
+	if mask&unix.FAN_DELETE != 0 {
+		out = append(out, c.named(Deleted, infoDirName, infos, pid, isDir)...)
+	}
+	if mask&unix.FAN_CLOSE_WRITE != 0 {
+		out = append(out, c.named(Written, infoDirName, infos, pid, isDir)...)
+	}
+	return out
+}
+
+// named resolves the records of one info type to paths under root.
+func (c *Changes) named(op string, infoType byte, infos []info, pid int, isDir bool) []Change {
+	var out []Change
+	for _, in := range infos {
+		if in.kind != infoType || in.name == "" {
+			continue
 		}
-		if mask&unix.FAN_DELETE != 0 {
-			emit(Deleted, infoDirName)
+		dir, ok := c.resolveDir(in.handleType, in.handle)
+		if !ok {
+			c.Overflowed = true
+			continue
 		}
-		if mask&unix.FAN_CLOSE_WRITE != 0 {
-			emit(Written, infoDirName)
+		path := filepath.Join(dir, in.name)
+		if path != c.root && !strings.HasPrefix(path, c.root+"/") {
+			continue
 		}
+		if isDir {
+			c.dirs = map[string]string{} // a moved dir invalidates cached paths
+		}
+		out = append(out, Change{op, path, pid, isDir})
 	}
 	return out
 }

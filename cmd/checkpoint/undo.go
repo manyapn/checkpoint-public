@@ -9,7 +9,6 @@ import (
 	"github.com/manyapn/checkpoint-public/internal/objects"
 	"github.com/manyapn/checkpoint-public/internal/snapshot"
 	"github.com/manyapn/checkpoint-public/internal/undo"
-	"github.com/manyapn/checkpoint-public/internal/writelog"
 )
 
 func cmdUndo(args []string) error {
@@ -39,19 +38,9 @@ func cmdUndo(args []string) error {
 		fmt.Println("nothing to undo (no checkpoints yet)")
 		return nil
 	}
-	since := int64(0)
-	if baseline != nil {
-		since = baseline.TimeNS
-	}
-	writes, err := writelog.Read(filepath.Join(t.storeDir, snapshot.LogFile))
+	window, err := undo.Window(t.storeDir, baseline)
 	if err != nil {
 		return err
-	}
-	var window []writelog.Entry
-	for _, w := range writes {
-		if w.TimeNS > since {
-			window = append(window, w)
-		}
 	}
 	var only []string
 	if *onlyFlag != "" {

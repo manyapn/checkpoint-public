@@ -28,58 +28,32 @@ func Prune(storeDir string, objs *objects.Store, keepDays int, now time.Time, dr
 	if err != nil {
 		return rep, err
 	}
-	cutoff := now.Add(-time.Duration(keepDays) * 24 * time.Hour).UnixNano()
-	var kept []*Checkpoint
-	for i, c := range all {
-		old := c.TimeNS < cutoff
-		if old && c.Name == "" && i != len(all)-1 {
-			rep.RemovedCheckpoints = append(rep.RemovedCheckpoints, c.ID)
-			continue
-		}
-		kept = append(kept, c)
+	kept, expired := splitByAge(all, now.Add(-time.Duration(keepDays)*24*time.Hour).UnixNano())
+	for _, c := range expired {
+		rep.RemovedCheckpoints = append(rep.RemovedCheckpoints, c.ID)
 	}
-	keepAfter := int64(0)
-	if len(kept) > 0 {
-		keepAfter = kept[0].TimeNS
-	}
+
 	writes, err := writelog.Read(filepath.Join(storeDir, LogFile))
 	if err != nil {
 		return rep, err
 	}
-	var keptWrites []writelog.Entry
-	for _, w := range writes {
-		if w.TimeNS >= keepAfter {
-			keptWrites = append(keptWrites, w)
-		}
-	}
+	keptWrites := writesSince(writes, kept)
 	rep.ExpiredWrites = len(writes) - len(keptWrites)
 
-	referenced := map[string]bool{}
-	for _, c := range kept {
-		for _, e := range c.Entries {
-			referenced[e.Ref] = true
-		}
-	}
-	for _, w := range keptWrites {
-		referenced[w.Ref] = true
-	}
-	refs, err := objs.List()
+	garbage, err := unreferenced(objs, kept, keptWrites)
 	if err != nil {
 		return rep, err
 	}
-	var garbage []string
-	for _, ref := range refs {
-		if !referenced[ref] {
-			garbage = append(garbage, ref)
-			rep.RemovedObjects++
-			rep.RemovedBytes += objs.Size(ref)
-		}
+	rep.RemovedObjects = len(garbage)
+	for _, ref := range garbage {
+		rep.RemovedBytes += objs.Size(ref)
 	}
 	if dryRun {
 		return rep, nil
 	}
-	for _, id := range rep.RemovedCheckpoints {
-		if err := Remove(storeDir, id); err != nil && !os.IsNotExist(err) {
+
+	for _, c := range expired {
+		if err := Remove(storeDir, c.ID); err != nil && !os.IsNotExist(err) {
 			return rep, err
 		}
 	}
@@ -94,6 +68,59 @@ func Prune(storeDir string, objs *objects.Store, keepDays int, now time.Time, dr
 		}
 	}
 	return rep, nil
+}
+
+// splitByAge separates checkpoints to keep from those to drop: unnamed,
+// older than cutoff, and not the latest.
+func splitByAge(all []*Checkpoint, cutoff int64) (kept, expired []*Checkpoint) {
+	for i, c := range all {
+		if c.TimeNS < cutoff && c.Name == "" && i != len(all)-1 {
+			expired = append(expired, c)
+		} else {
+			kept = append(kept, c)
+		}
+	}
+	return kept, expired
+}
+
+// writesSince keeps the write log from the oldest kept checkpoint on; older
+// writes back no checkpoint and no undo window.
+func writesSince(writes []writelog.Entry, kept []*Checkpoint) []writelog.Entry {
+	keepAfter := int64(0)
+	if len(kept) > 0 {
+		keepAfter = kept[0].TimeNS
+	}
+	var out []writelog.Entry
+	for _, w := range writes {
+		if w.TimeNS >= keepAfter {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// unreferenced lists the objects no kept checkpoint or write refers to.
+func unreferenced(objs *objects.Store, kept []*Checkpoint, writes []writelog.Entry) ([]string, error) {
+	referenced := map[string]bool{}
+	for _, c := range kept {
+		for _, e := range c.Entries {
+			referenced[e.Ref] = true
+		}
+	}
+	for _, w := range writes {
+		referenced[w.Ref] = true
+	}
+	refs, err := objs.List()
+	if err != nil {
+		return nil, err
+	}
+	var garbage []string
+	for _, ref := range refs {
+		if !referenced[ref] {
+			garbage = append(garbage, ref)
+		}
+	}
+	return garbage, nil
 }
 
 type Usage struct {

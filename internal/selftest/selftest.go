@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -54,6 +55,12 @@ func (r Report) Text() string {
 	return b.String()
 }
 
+// skipped means a scenario could not be exercised on this machine, with
+// the reason; it is reported, never counted as a pass.
+type skipped struct{ reason string }
+
+func (s skipped) Error() string { return s.reason }
+
 type session struct {
 	bin, root, store string
 	verbose          bool
@@ -85,11 +92,12 @@ func Run(bin, work string, verbose bool) Report {
 		s.step++
 		err := scenario.fn()
 		status, detail := "pass", "ok"
-		if err != nil {
+		var skip skipped
+		switch {
+		case errors.As(err, &skip):
+			status, detail = "skip", skip.reason
+		case err != nil:
 			status, detail = "fail", err.Error()
-			if strings.HasPrefix(err.Error(), "skip: ") {
-				status, detail = "skip", strings.TrimPrefix(err.Error(), "skip: ")
-			}
 		}
 		s.report.Results = append(s.report.Results, Result{scenario.name, status, detail})
 		if s.verbose {
@@ -263,7 +271,7 @@ func (s *session) undoPreservesHuman() error {
 
 func (s *session) agentDeleteUndone() error {
 	if !s.feed {
-		return fmt.Errorf("skip: this filesystem does not report who deletes files (no change feed), so an agent's delete cannot be undone here")
+		return skipped{"this filesystem does not report who deletes files (no change feed), so an agent's delete cannot be undone here"}
 	}
 	s.cli(30*time.Second, "save")
 	if _, err := s.cli(30*time.Second, "run", "--", "sh", "-c", "rm doomed.txt"); err != nil {
