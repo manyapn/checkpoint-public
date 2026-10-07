@@ -2,69 +2,49 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"time"
 
-	"github.com/manyapn/checkpoint-public/internal/status"
-	"github.com/manyapn/checkpoint-public/internal/store"
+	"github.com/manyapn/checkpoint-public/internal/daemon"
+	"github.com/manyapn/checkpoint-public/internal/snapshot"
 )
 
+type historyRow struct {
+	ID             int                  `json:"id"`
+	TimeNS         int64                `json:"time_ns"`
+	Badge          string               `json:"badge"`
+	Source         string               `json:"source"`
+	Name           string               `json:"name"`
+	SettleTimedOut bool                 `json:"settle_timed_out"`
+	Exceptions     []snapshot.Exception `json:"exceptions"`
+}
+
 func cmdHistory(args []string) error {
-	fs := flag.NewFlagSet("history", flag.ExitOnError)
-	rootFlag := fs.String("root", "", "protected root (default: current directory)")
-	storeFlag := fs.String("store", "", "store directory (default: derived from root path)")
-	jsonFlag := fs.Bool("json", false, "emit JSON (a pure client contract; the TUI reads this)")
+	fs, rootFlag, storeFlag := flags("history")
+	asJSON := fs.Bool("json", false, "machine-readable output")
 	fs.Parse(args)
-	if fs.NArg() != 0 {
-		return fmt.Errorf("history: unexpected argument %q (this command takes only flags)", fs.Arg(0))
+	if err := noArgs(fs); err != nil {
+		return err
 	}
-	root := *rootFlag
-	if root == "" {
-		if wd, err := os.Getwd(); err == nil {
-			root = wd
-		}
-	}
-	root, err := resolveDir(root)
+	t, err := resolve(*rootFlag, *storeFlag)
 	if err != nil {
 		return err
 	}
-	storeDir, err := resolveStore(*storeFlag, root)
+	all, err := snapshot.All(t.storeDir)
 	if err != nil {
 		return err
 	}
-	warnStoreFor(storeDir, root)
-	ids, err := store.IDs(storeDir)
-	if err != nil {
-		return err
-	}
-
-	// Newest first: the most recent checkpoint is the one a user is looking for.
-	type row struct {
-		ID             int               `json:"id"`
-		TimeNS         int64             `json:"time_ns"`
-		Badge          string            `json:"badge"`
-		Source         string            `json:"source"`
-		Name           string            `json:"name"` // "" when unnamed (always present; client contract)
-		SettleTimedOut bool              `json:"settle_timed_out"`
-		Missed         int               `json:"missed"`
-		Exceptions     []store.Exception `json:"exceptions"`
-	}
-	rows := []row{} // never null in --json: "checkpoints" is [] on an empty store (client contract)
-	for i := len(ids) - 1; i >= 0; i-- {
-		m, err := store.Load(storeDir, ids[i])
-		if err != nil {
-			continue
-		}
-		exc := m.Exceptions
+	rows := []historyRow{}
+	for i := len(all) - 1; i >= 0; i-- {
+		c := all[i]
+		exc := c.Exceptions
 		if exc == nil {
-			exc = []store.Exception{} // never null (client contract)
+			exc = []snapshot.Exception{}
 		}
-		rows = append(rows, row{m.ID, m.TimeNS, status.Of(m).String(), m.Source, m.Name, m.SettleTimedOut, m.Missed, exc})
+		rows = append(rows, historyRow{c.ID, c.TimeNS, c.Badge(), c.Source, c.Name, c.SettleTimedOut, exc})
 	}
-
-	if *jsonFlag {
+	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"checkpoints": rows})
 	}
 	if len(rows) == 0 {
@@ -72,25 +52,108 @@ func cmdHistory(args []string) error {
 		return nil
 	}
 	for _, r := range rows {
-		when := time.Unix(0, r.TimeNS).Format("2006-01-02 15:04:05")
-		note := ""
-		if r.SettleTimedOut {
-			note = "  [settle timed out]"
-		}
-		if r.Missed > 0 {
-			note += fmt.Sprintf("  [%d file(s) uncaptured]", r.Missed)
-		}
-		src := r.Source
-		if src == "" {
-			src = "(unlabeled)"
-		}
+		label := r.Source
 		if r.Name != "" {
-			src += fmt.Sprintf("  name:%q", r.Name)
+			label += fmt.Sprintf("  name:%q", r.Name)
 		}
-		fmt.Printf("#%-3d %s  %-28s  %s%s\n", r.ID, when, r.Badge, src, note)
+		if r.SettleTimedOut {
+			label += "  [settle timed out]"
+		}
+		fmt.Printf("#%-3d %s  %-28s %s\n", r.ID, time.Unix(0, r.TimeNS).Format("2006-01-02 15:04:05"), r.Badge, label)
 		for _, ex := range r.Exceptions {
 			fmt.Printf("      ! %s (%s)\n", ex.Path, ex.Reason)
 		}
 	}
 	return nil
+}
+
+type statusView struct {
+	daemon.Status
+	Store        string `json:"store"`
+	StorageBytes int64  `json:"storage_bytes"`
+}
+
+func cmdStatus(args []string) error {
+	fs, rootFlag, storeFlag := flags("status")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	fs.Parse(args)
+	if err := noArgs(fs); err != nil {
+		return err
+	}
+	t, err := resolve(*rootFlag, *storeFlag)
+	if err != nil {
+		return err
+	}
+	usage := snapshot.MeasureUsage(t.storeDir)
+	v := statusView{Store: t.storeDir, StorageBytes: usage.Bytes}
+	v.Status, err = daemon.GetStatus(t.sock)
+	if err != nil {
+		v.Status = daemon.Status{Root: t.root, Checkpoints: usage.Checkpoints, Missed: []string{}, Outside: []string{}}
+		if latest, _ := snapshot.Latest(t.storeDir); latest != nil {
+			v.LastCheckpointNS = latest.TimeNS
+		}
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(v)
+	}
+	switch {
+	case !v.Protected:
+		fmt.Println("Protection: not running (checkpoint protect to start)")
+	case v.Limited():
+		fmt.Println("Protection: limited")
+	default:
+		fmt.Println("Protection: on")
+	}
+	fmt.Printf("Root: %s\nStore: %s (%s, %s)\n", t.root, t.storeDir, humanBytes(usage.Bytes), plural(v.Checkpoints, "checkpoint", "checkpoints"))
+	fmt.Printf("Last checkpoint: %s\n", ago(v.LastCheckpointNS))
+	if !v.Protected {
+		return nil
+	}
+	fmt.Printf("Protecting since: %s\n", time.Unix(0, v.SinceNS).Format("2006-01-02 15:04:05"))
+	fmt.Printf("Agent sessions: %d\n", v.AgentSessions)
+	if v.FeedActive {
+		fmt.Println("Change feed: on (deletions attributed, checkpoints scale with changes)")
+	} else {
+		fmt.Println("Change feed: off on this filesystem (deletions not attributed, full scan per checkpoint)")
+	}
+	if v.Overflowed {
+		fmt.Println("  ! the kernel dropped events since the last checkpoint; some writes may be unrecorded")
+	}
+	for _, p := range v.Missed {
+		fmt.Printf("  ! write not captured: %s\n", p)
+	}
+	if v.OutsideCount > 0 {
+		fmt.Printf("  ! the agent wrote %s outside the protected folder (not recorded):\n", plural(v.OutsideCount, "time", "times"))
+		for _, p := range v.Outside {
+			fmt.Printf("      %s\n", p)
+		}
+	}
+	if latest, _ := snapshot.Latest(t.storeDir); latest != nil && len(latest.Exceptions) > 0 {
+		fmt.Printf("Not covered by checkpoint %d:\n", latest.ID)
+		for _, ex := range latest.Exceptions {
+			fmt.Printf("  ! %s (%s)\n", ex.Path, ex.Reason)
+		}
+	}
+	return nil
+}
+
+func ago(ns int64) string {
+	if ns <= 0 {
+		return "none yet"
+	}
+	return time.Since(time.Unix(0, ns)).Round(time.Second).String() + " ago"
+}
+
+func humanBytes(n int64) string {
+	units := []string{"B", "kB", "MB", "GB", "TB"}
+	v := float64(n)
+	i := 0
+	for v >= 1000 && i < len(units)-1 {
+		v /= 1000
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%d B", n)
+	}
+	return fmt.Sprintf("%.1f %s", v, units[i])
 }

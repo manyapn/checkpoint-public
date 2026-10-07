@@ -2,183 +2,153 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/manyapn/checkpoint-public/internal/daemon"
-	"github.com/manyapn/checkpoint-public/internal/provenance"
+	"github.com/manyapn/checkpoint-public/internal/lineage"
 )
 
-// cmdProtect establishes standing protection: it starts the daemon DETACHED
-// (own session, logs to <store>/daemon.log, pid recorded in <store>/daemon.pid)
-// and confirms protection before returning. --stop tears it down. The daemon
-// subcommand stays for foreground/supervised use; protect is the everyday form.
+// protect starts the daemon detached, logging to <store>/daemon.log, and
+// confirms it answers before returning.
 func cmdProtect(args []string) error {
-	fs := flag.NewFlagSet("protect", flag.ExitOnError)
-	storeFlag := fs.String("store", "", "store directory (default: derived from root path)")
-	protectFlag := fs.String("protect", "", "comma-separated additional folders to protect (absolute paths)")
-	stopFlag := fs.Bool("stop", false, "stop the standing daemon for this root")
+	fs, rootFlag, storeFlag := flags("protect")
+	stop := fs.Bool("stop", false, "stop protection for this folder")
 	fs.Parse(args)
-	root := ""
 	if fs.NArg() > 1 {
-		return fmt.Errorf("protect: expected at most one <root>")
+		return fmt.Errorf("expected at most one folder")
 	}
 	if fs.NArg() == 1 {
-		root = fs.Arg(0)
+		*rootFlag = fs.Arg(0)
 	}
-	if root == "" {
-		if wd, err := os.Getwd(); err == nil {
-			root = wd
-		}
-	}
-	root, err := resolveDir(root)
+	t, err := resolve(*rootFlag, *storeFlag)
 	if err != nil {
 		return err
 	}
-	storeDir, err := resolveStore(*storeFlag, root)
-	if err != nil {
-		return err
+	pidFile := filepath.Join(t.storeDir, "daemon.pid")
+	if *stop {
+		return stopDaemon(t, pidFile)
 	}
-	if err := checkSocketPath(storeDir); err != nil {
-		return err
-	}
-	sock := daemon.SocketPath(storeDir)
-	pidFile := filepath.Join(storeDir, "daemon.pid")
-
-	if *stopFlag {
-		b, err := os.ReadFile(pidFile)
-		if err != nil {
-			if _, serr := daemon.RequestStatus(sock); serr != nil {
-				fmt.Println("not protected (no standing daemon)")
-				return nil
-			}
-			return fmt.Errorf("protect --stop: a daemon answers on %s but %s is missing; it was started in the foreground, so stop it there", sock, pidFile)
-		}
-		var pid int
-		if _, err := fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &pid); err != nil || pid <= 0 {
-			return fmt.Errorf("protect --stop: %s is corrupt; stop the daemon manually", pidFile)
-		}
-		// Identify the process before signalling, so a pid recycled during
-		// shutdown cannot be mistaken for the daemon still running.
-		start, haveStart := provenance.StartTime(pid)
-		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return err
-		}
-		// Wait for the PROCESS to exit, not merely for its socket to stop
-		// answering. The daemon closes its listener early in shutdown and then
-		// still cuts a final checkpoint and releases the store locks, so a stop
-		// that returned on socket silence would report success while the old
-		// daemon still held the versionlog lock. The next `protect` would then
-		// fail to start, and `prune`, which requires a stopped daemon, could run
-		// against a live one.
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			if !stillRunning(pid, start, haveStart) {
-				os.Remove(pidFile)
-				fmt.Printf("protection stopped for %s\n", root)
-				return nil
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		return fmt.Errorf("protect --stop: daemon (pid %d) did not exit within 10s", pid)
-	}
-
-	if st, err := daemon.RequestStatus(sock); err == nil {
-		fmt.Printf("already protected (daemon running since %s; %d checkpoint(s))\n",
-			time.Unix(0, st.SinceUnixNS).Format("2006-01-02 15:04:05"), st.Checkpoints)
+	if st, err := daemon.GetStatus(t.sock); err == nil {
+		fmt.Printf("already protected since %s (%s)\n",
+			time.Unix(0, st.SinceNS).Format("2006-01-02 15:04:05"), plural(st.Checkpoints, "checkpoint", "checkpoints"))
 		return nil
 	}
-	// Statically invalid configurations must fail NOW, not after a 15s readiness
-	// wait on a daemon that already exited: nesting is decidable from the paths
-	// alone, and the foreground `daemon` rejects it immediately.
-	var protectExtras []string
-	for _, p := range strings.Split(*protectFlag, ",") {
-		if p = strings.TrimSpace(p); p == "" {
-			continue
-		}
-		abs, err := resolveDir(p)
-		if err != nil {
-			return err
-		}
-		if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
-			return fmt.Errorf("protect: protected folder %s is not a directory", abs)
-		}
-		protectExtras = append(protectExtras, abs)
-	}
-	allRoots := append([]string{root}, protectExtras...)
-	for i, a := range allRoots {
-		for j, b := range allRoots {
-			if i != j && (a == b || strings.HasPrefix(a, b+string(filepath.Separator))) {
-				return fmt.Errorf("protect: protected folders must not nest: %s is under %s", a, b)
-			}
-		}
-	}
-	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+	if err := os.MkdirAll(t.storeDir, 0o700); err != nil {
 		return err
 	}
-	self, err := os.Executable()
+	self, _ := os.Executable()
+	logFile, err := os.OpenFile(filepath.Join(t.storeDir, "daemon.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	logF, err := os.OpenFile(filepath.Join(storeDir, "daemon.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
+	defer logFile.Close()
+	cmd := exec.Command(self, "daemon", "--store", t.storeDir, t.root)
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
 		return err
 	}
-	defer logF.Close()
-	dArgs := []string{"daemon", "--store", storeDir}
-	if len(protectExtras) > 0 {
-		dArgs = append(dArgs, "--protect", strings.Join(protectExtras, ","))
-	}
-	dArgs = append(dArgs, root)
-	c := exec.Command(self, dArgs...)
-	c.Stdout, c.Stderr = logF, logF
-	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survives this shell/session
-	if err := c.Start(); err != nil {
-		return err
-	}
-	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", c.Process.Pid)), 0o600); err != nil {
-		return err
-	}
-	go c.Wait() // reap if it dies before we detach
-	// Confirm protection (or fail with the daemon's own words) before returning.
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		if st, err := daemon.RequestStatus(sock); err == nil {
-			state := "protected"
-			if st.SettingUp {
-				state = "setting up (first scan running)"
-			} else if !st.BaselineComplete {
-				state = "limited (baseline incomplete; auto-rescan running)"
-			}
-			fmt.Printf("protection started for %s: %s [log: %s]\n", root, state, filepath.Join(storeDir, "daemon.log"))
+	os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o600)
+	go cmd.Wait()
+	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
+		if daemon.Running(t.sock) {
+			fmt.Printf("protection started for %s (log: %s)\n", t.root, logFile.Name())
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	b, _ := os.ReadFile(filepath.Join(storeDir, "daemon.log"))
-	tail := string(b)
-	if len(tail) > 500 {
-		tail = tail[len(tail)-500:]
-	}
 	os.Remove(pidFile)
-	return fmt.Errorf("daemon did not become ready within 15s; log tail:\n%s", tail)
+	tail, _ := os.ReadFile(logFile.Name())
+	return fmt.Errorf("daemon did not start within 15s; log:\n%s", tail)
 }
 
-// waitStopped polls /proc until pid reaches the stopped state (the trampoline's
-// self-SIGSTOP has landed).
-// stillRunning reports whether pid is still the process it was when start was
-// read. A pid that vanished, or that now carries a different start-time (the
-// number was reused), is not the daemon any more.
-func stillRunning(pid int, start uint64, haveStart bool) bool {
-	now, ok := provenance.StartTime(pid)
-	if !ok {
-		return false // no /proc entry: the process is gone
+// stopDaemon signals the daemon and waits for the process (not just the
+// socket) to go away, because it still holds the store while it cuts its
+// final checkpoint.
+func stopDaemon(t target, pidFile string) error {
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		if daemon.Running(t.sock) {
+			return fmt.Errorf("a daemon answers on %s but was started in the foreground; stop it there", t.sock)
+		}
+		fmt.Println("not protected")
+		return nil
 	}
-	return !haveStart || now == start
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return fmt.Errorf("%s is corrupt", pidFile)
+	}
+	start, _ := lineage.StartTime(pid)
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if now, ok := lineage.StartTime(pid); !ok || now != start {
+			os.Remove(pidFile)
+			fmt.Printf("protection stopped for %s\n", t.root)
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return fmt.Errorf("daemon (pid %d) did not exit within 10s", pid)
+}
+
+// daemon runs protection in the foreground; protect uses it detached.
+func cmdDaemon(args []string) error {
+	fs, rootFlag, storeFlag := flags("daemon")
+	fs.Parse(args)
+	if fs.NArg() == 1 {
+		*rootFlag = fs.Arg(0)
+	}
+	t, err := resolve(*rootFlag, *storeFlag)
+	if err != nil {
+		return err
+	}
+	if len(t.sock)+1 > 108 {
+		return fmt.Errorf("store path too long for a Unix socket (%d bytes, max 107); use a shorter --store", len(t.sock))
+	}
+	ready, stop, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() { done <- daemon.Serve(daemon.Config{Root: t.root, StoreDir: t.storeDir}, ready, stop) }()
+	select {
+	case <-ready:
+		fmt.Printf("protecting %s (store %s)\n", t.root, t.storeDir)
+	case err := <-done:
+		return err
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case <-sig:
+		close(stop)
+		return <-done
+	case err := <-done:
+		return err
+	}
+}
+
+func cmdRegisterAgent(args []string, register bool) error {
+	fs, rootFlag, storeFlag := flags("register-agent")
+	pid := fs.Int("pid", 0, "pid of the agent process")
+	fs.Parse(args)
+	t, err := resolve(*rootFlag, *storeFlag)
+	if err != nil {
+		return err
+	}
+	start, ok := lineage.StartTime(*pid)
+	if !ok {
+		return fmt.Errorf("no live process with pid %d", *pid)
+	}
+	id := lineage.Identity{Pid: *pid, Start: start}
+	if register {
+		return daemon.Register(t.sock, id)
+	}
+	return daemon.Unregister(t.sock, id)
 }

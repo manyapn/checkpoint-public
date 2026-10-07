@@ -1,73 +1,35 @@
-# checkpoint: build, test, install.
+# checkpoint: build, test, demo.
 #
-# Go stamps the VCS revision into the binary automatically, so `checkpoint
-# version` reports the commit it was built from with no build-time flags. That
-# only works when building from the git checkout, which is why there is no
-# vendored/tarball build path here.
+#   make build        bin/checkpoint and bin/checkpoint-ui (any OS)
+#   make test         the tests that need no kernel, on this machine
+#   make linux-test   the whole suite in a privileged Linux container (needs Docker)
+#   make demo         build in the container and run the self-test as a story
+#   make install      copy both binaries to /usr/local/bin (Linux)
 
-PREFIX  ?= /usr/local
-DESTDIR ?=
-BINDIR   = $(DESTDIR)$(PREFIX)/bin
-BIN      = bin/checkpoint
-UIBIN    = bin/checkpoint-ui
+GO ?= go
+PREFIX ?= /usr/local
 
-GO       ?= go
-GOFLAGS  ?=
+.PHONY: build test linux-test demo install vet clean
 
-# Targets that start a real daemon need CAP_SYS_ADMIN. Inside a container or on
-# CI you are usually root already, and often no sudo binary is installed at all,
-# so only reach for it when the euid says you have to.
-SUDO := $(shell [ "$$(id -u)" = 0 ] || echo sudo)
-
-# Benchmark knobs. BENCH_BASE should sit on ext4/xfs/btrfs; left empty, the
-# harness picks a temp dir and records honestly whether the change feed was
-# available there.
-BENCH_BASE   ?=
-BENCH_ROUNDS ?= 5
-
-.PHONY: all build test vet install uninstall demo bench accept clean
-
-all: build
-
-# Two binaries on purpose. The interactive screen links Bubble Tea, whose
-# package init queries the terminal and waits out a five second timeout when
-# nothing answers, so keeping it out of the CLI keeps every other command fast.
 build:
-	$(GO) build $(GOFLAGS) -o $(BIN) ./cmd/checkpoint
-	$(GO) build $(GOFLAGS) -o $(UIBIN) ./cmd/checkpoint-ui
-
-# The fanotify-backed tests need CAP_SYS_ADMIN. Without it they skip rather
-# than fail, so a plain `make test` still passes while proving much less. Run
-# it under sudo to exercise capture, the daemon and the end-to-end suite.
-test:
-	$(GO) test ./... -count=1
+	$(GO) build -o bin/checkpoint ./cmd/checkpoint
+	$(GO) build -o bin/checkpoint-ui ./cmd/checkpoint-ui
 
 vet:
 	$(GO) vet ./...
+	GOOS=linux $(GO) vet ./...
+
+test: vet
+	$(GO) test ./... -count=1
+
+linux-test:
+	scripts/linux.sh go test ./... -count=1
+
+demo:
+	scripts/linux.sh sh -c 'make build && bin/checkpoint selftest --verbose --work "$$TMPDIR"'
 
 install: build
-	install -d $(BINDIR)
-	install -m 0755 $(BIN) $(BINDIR)/checkpoint
-	install -m 0755 $(UIBIN) $(BINDIR)/checkpoint-ui
-
-uninstall:
-	rm -f $(BINDIR)/checkpoint $(BINDIR)/checkpoint-ui
-
-# The demo starts a real daemon, so it needs root. It runs entirely inside its
-# own throwaway sandbox and leaves the machine unchanged.
-demo: build
-	$(SUDO) ./demo/run_demo.sh --bin $(CURDIR)/$(BIN)
-
-# The benchmark drives real daemons through destructive scenarios in throwaway
-# sandboxes, so it needs root for the same reason the daemon does.
-bench: build
-	$(GO) build $(GOFLAGS) -o bin/bench ./bench
-	$(SUDO) ./bin/bench --bin $(CURDIR)/$(BIN) --base "$(BENCH_BASE)" \
-		--rounds $(BENCH_ROUNDS) --out results/bench.json
-
-# Score the last bench run against the thresholds in bench/accept.sh.
-accept:
-	bash bench/accept.sh results/bench.json
+	install -m 0755 bin/checkpoint bin/checkpoint-ui $(PREFIX)/bin/
 
 clean:
-	rm -rf bin dist results
+	rm -rf bin

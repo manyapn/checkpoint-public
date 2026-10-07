@@ -1,126 +1,134 @@
 # checkpoint
 
-[![CI](https://github.com/manyapn/checkpoint-public/actions/workflows/ci.yml/badge.svg)](https://github.com/manyapn/checkpoint-public/actions/workflows/ci.yml)
+Version control for long-running AI agent sessions.
 
-**Version control built for long-running agent sessions.**
+When an agent edits your project for hours, git cannot tell its edits from
+yours inside one working tree, and a file the agent created and deleted
+between commits never existed. checkpoint keeps a second history underneath
+git: it records every file write as it happens, remembers who made it, and
+cuts a checkpoint at the end of every agent turn.
 
-Git assumes a person decides when a unit of work is finished, and commits it. That works for humans, but not for an agent that works on its own for hours.
+- `undo` puts back only what the agent changed and leaves your edits alone.
+  If you both changed a file it refuses and says so; it never merges.
+- `restore` rebuilds the project byte-exact, modes and symlinks included,
+  even after `rm -rf`. The history lives outside the project.
+- `recover` returns files that were created and deleted inside one turn and
+  never reached a checkpoint.
 
-- A usable timeline would mean committing CONSTANTLY, and the history becomes noise you have to clean up before anyone can read it
-- Git records an author per commit, not per change, so inside one working tree it cannot tell the agent's edits from the ones you made alongside them
-- A file the agent created and deleted between two commits never existed, as far as git is concerned
-- `git checkout .` to undo the agent throws away what you wrote in the same window
-
-Checkpoint keeps a second history underneath the one you publish. 
-
-It commits itself, it knows who wrote each file, and it never touches your git history. 
-
-| Coming from git | In checkpoint |
-| --- | --- |
-| `git commit`, if you remembered to | happens on its own, at every agent turn |
-| `git log` | `checkpoint history` |
-| `git checkout <sha> -- .` | `checkpoint restore <id>` |
-| `git revert` | `checkpoint undo`, which reverts the agent and keeps you |
-| `git stash`, decided in advance | nothing to decide: it was already recorded |
-| `git gc` | `checkpoint prune` |
-| *no equivalent* | `checkpoint recover`, for files that never lived to a commit |
-
-```console
-$ checkpoint history
-#4   2026-08-04 04:10:16  Fully recoverable             run: ./agent_turn.sh
-#3   2026-08-04 04:08:00  Recoverable with exceptions   run: ./agent_turn.sh
-      ! .env (not captured: looks like credential material (security default))
-#2   2026-08-04 04:07:45  Fully recoverable             manual
-#1   2026-08-04 04:07:40  Fully recoverable             setup
-
-$ checkpoint undo
-undo of checkpoint 4: reverted 2, removed 0, skipped 0 for review
-pre-undo checkpoint 5 saved (restore it to undo this undo)
-```
-
-![the demo, recorded end to end on ext4](demo/demo.svg)
-
-Every step above is asserted against disk state as it runs, and the recording is one unedited take. `make demo` reproduces it on your machine in about four seconds. 
-
-**checkpoint is NOT a replacement for git.** No branches, no merges, no remotes, nothing here is meant to be published or reviewed. Git holds the history of your project. checkpoint holds the history of the session, which git was never built to hold. 
-
-The harder half is coverage. **checkpoint never claims protection it does not have.** Every checkpoint carries a badge (Fully recoverable, Recoverable with exceptions, or Incomplete), every gap names the exact paths it could not cover, and a filesystem that cannot support the full guarantee tells you so when you run `checkpoint doctor`, not when you try to restore. 
-
----
-
-## What it does that git cannot
-
-- **Reverts by AUTHOR, not by commit.** `undo` puts back what the agent wrote and leaves the file you edited in the same window alone. If you both wrote the same file, it refuses and says so rather than merging or guessing.
-- **Restores a workspace that no longer exists.** The history lives outside the project, so `rm -rf` of the project does not touch it. `restore` rebuilds the tree byte-exact, including modes, exec bits, symlink targets and empty directories.
-- **Recovers what was never committed.** A file the agent created and deleted inside one turn is still there, because recording is continuous and checkpoints are only labels over it.
+Linux only (it uses fanotify), needs root or `CAP_SYS_ADMIN`.
 
 ## Try it
 
 ```sh
-git clone https://github.com/manyapn/checkpoint-public
-cd checkpoint-public
-make build && sudo make install     # installs bin/checkpoint to /usr/local/bin
+git clone https://github.com/manyapn/checkpoint-public && cd checkpoint-public
+make build && sudo make install
+cd ~/my-project
+sudo checkpoint doctor          # will this work on this machine and filesystem?
+sudo checkpoint protect         # start recording; cuts a first checkpoint now
+sudo checkpoint run -- claude   # or any agent; its turn becomes a checkpoint
+checkpoint history
+sudo checkpoint undo            # revert that turn's agent-only changes
+sudo checkpoint protect --stop
 ```
 
-```console
-$ cd ~/my-project
-$ sudo checkpoint doctor       # will this work here? it answers before you rely on it
-$ sudo checkpoint protect      # start recording; cuts a complete baseline now
-$ sudo checkpoint run -- claude    # or codex, aider, or any command at all
-$ checkpoint history           # the session, turn by turn
-$ sudo checkpoint undo         # revert that turn's agent-only changes
-```
-
-`make demo` runs the whole story end to end and asserts every claim against disk state, in about four seconds. It is the fastest way to see what this does without wiring it into your own work.
-
-## How it fits together
+`sudo checkpoint selftest --verbose` proves every guarantee on your own
+machine by driving the real binary through seven scenarios and checking
+bytes on disk:
 
 ```
-    your project                       the session history (outside the project)
-    ------------                       ----------------------------------------
-    agent writes  ─┐
-                   │   kernel tells checkpoint a file was closed, and hands
-    you write     ─┤   over an open handle to it (which is why a deleted
-                   │   file is still readable)
-                   ▼
-              [ capture ] ── who wrote it? walk the process tree back
-                   │          to the agent that launched it     [ provenance ]
-                   │
-                   ├──────────▶ contents, stored by hash        [ objstore ]
-                   └──────────▶ one row per write, with author  [ versionlog ]
-                                                │
-        turn ends, command exits, or you ask ───┤
-                                                ▼
-                                    a checkpoint: the whole tree,
-                                    file by file, at that instant    [ store ]
-                                                │
-                        history / restore / undo / recover  ◀───────┘
+STEP 1 protection-starts            PASS
+STEP 2 write-captured-and-restorable PASS
+STEP 3 rm-rf-disaster-restore       PASS
+STEP 4 transient-salvage            PASS
+STEP 5 agent-undo-preserves-human   PASS
+STEP 6 agent-delete-undone          PASS
+STEP 7 secrets-never-captured       PASS
+
+VERDICT: every guarantee that could be tested held on this machine.
 ```
 
-The pieces above are the packages: `internal/capture`, `internal/provenance`, `internal/objstore`, `internal/versionlog`, `internal/store`, with `internal/daemon` deciding when a checkpoint happens and `internal/undo` doing the author-scoped revert.
+## Running it from a Mac
 
-## Reading further
+The product needs a Linux kernel, so the kernel-dependent tests run in a
+privileged Docker container with a loopback ext4 filesystem. Docker Desktop
+is the only setup.
+
+```sh
+make test          # everything that needs no kernel, on this machine, in seconds
+make linux-test    # the whole suite in the container
+make demo          # build in the container and run the selftest as a narrated story
+```
+
+`scripts/linux.sh <command>` runs any command the same way. One thing to
+know: a folder shared from macOS into Docker Desktop accepts fanotify
+watches and then never delivers an event. `doctor` detects this and fails;
+the scripts put test workspaces on the ext4 mount instead.
+
+## How it works
+
+Read [docs/DESIGN.md](docs/DESIGN.md), one page with the diagram and the
+five decisions worth defending. [docs/INTERVIEW.md](docs/INTERVIEW.md) is
+the study guide: which file to read in which order and the questions you
+will be asked.
+
+```
+cmd/checkpoint       the commands (thin)
+cmd/checkpoint-ui    the terminal UI, a separate binary
+internal/objects     file contents by hash, in git's loose-object format
+internal/writelog    one line per write: path, content ref, author
+internal/snapshot    whole-tree checkpoints: scan, fold, restore, prune, salvage
+internal/lineage     agent | human | self | unknown, from the process tree
+internal/watch       the two fanotify listeners
+internal/daemon      records continuously, cuts checkpoints when asked
+internal/undo        the author-scoped revert
+internal/doctor      will it work here? probe, do not guess
+internal/selftest    the seven scenarios, against the real binary
+```
+
+## Commands
 
 | | |
 | --- | --- |
-| [Requirements and filesystem support](docs/requirements.md) | Linux, `CAP_SYS_ADMIN`, kernel versions, and exactly what overlayfs costs you |
-| [Guarantees, and what is not guaranteed](docs/guarantees.md) | both halves, at equal length |
-| [Storage and pruning](docs/storage.md) | what the history costs and how it is bounded |
-| [Verify the claims yourself](docs/verify.md) | `selftest` re-runs the guarantees on your machine |
-| [Command reference](docs/commands.md) | every command and flag |
-| [Measured results](docs/reports/) | real self-test and benchmark output, the machine they came from, and how to reproduce them |
+| `doctor` | probe the kernel, fanotify, the filesystem and the store location |
+| `protect [--stop] [DIR]` | start or stop standing protection |
+| `run -- <cmd>` | run a command as the agent; one checkpoint when it exits |
+| `save [--name L]` | cut a checkpoint now; named ones never expire |
+| `undo [--only a,b] [--save-both]` | revert the latest turn's agent-only changes |
+| `history [--json]`, `status [--json]` | what is recorded, what was missed |
+| `restore [--only a,b] ID [DIR]` | rebuild from a checkpoint, in place by default |
+| `recover [--to DIR]` | files no checkpoint holds |
+| `prune [--keep-days N] [--yes]` | expire old checkpoints, reclaim space (daemon stopped) |
+| `ui`, `selftest`, `version` | |
 
-## AI-assisted development
+All commands take `--root DIR` (default: the current directory) and
+`--store DIR` (default: `~/.local/share/checkpoint/<project>-<hash>`). A
+store inside the project is refused.
 
-This code was written with AI assistance. This is what I did in the development process to ensure my build was still correct + accurate (a thorough verification system):
+## What is not guaranteed
 
-- Model knowledge about `fanotify` edge cases is stale or wrong, and the kernel is the only authority. Every claim about watcher semantics had to be backed by a runnable program that exits 0 on a real kernel before it could be written down as fact.
-- A gate script could not be edited to make it pass. If a gate looked wrong, the rule is to stop and argue for changing it. 
-- Tests are written first, then the code. The tests look at the code as a black box. The gates grep for specific test functions, so a passing run with no tests is a failure.
-- All errors were each  reproduced first, then fixed. Each keeps its test as a permanent guard in the spirit of test-driven development.
-- Results were scored from the disk-state, as an agent reporting success is not evidence. See the demo for details on this (it asserts against real files, the benchmark fingerprints the tree, and `selftest` re-runs the guarantees on your machine)
-- Findings were checked by independent agents prompted to refute them, and the product was tested black-box against the built binary by an agent with no knowledge of the implementation.
+- No power-loss durability: process-crash consistency only.
+- `mmap` writes without a close are not captured.
+- Edits done as write-temp-then-rename (`sed -i`, some editors) show up as a
+  new file under the temp name; `restore` has the old content, `undo` cannot
+  link the two.
+- On filesystems without a change feed (overlayfs), deletions have no
+  author, so `undo` lists them instead of reverting them.
+- Credential-shaped files (`.env`, `*.pem`, `.ssh/`, ...) are never captured
+  and are listed as exceptions on every checkpoint.
+- One protected folder per store. Protect two folders with two daemons.
+- It is not a backup; the store is on the same disk.
 
-## License
+## History and AI assistance
 
-MIT. See [LICENSE](LICENSE).
+This is a from-scratch rewrite of the earlier version in this repository's
+history, with the same commands and guarantees in about a third of the code.
+Two features were dropped on purpose: extra protected folders
+(`--protect DIR,DIR`) and the interrupted-operation journal, since `undo` and
+`restore` already cut a checkpoint of the present before touching anything.
+
+The code was written with AI assistance. Nothing about kernel behavior was
+taken from the model: every fanotify claim is backed by a test that runs on
+a real kernel, and `selftest` judges by bytes on disk, not by what any
+program reports about itself.
+
+MIT license.
