@@ -136,8 +136,15 @@ func TestAgentWritesAreAttributedByLineage(t *testing.T) {
 
 func TestUnchangedWindowIsSkipped(t *testing.T) {
 	h := start(t)
-	if st, _ := GetStatus(h.sock); !st.FeedActive {
+	st, _ := GetStatus(h.sock)
+	if !st.FeedActive {
 		t.Skip("skip-empty needs the change feed")
+	}
+	// The feed marks the whole filesystem; another process deleting a
+	// directory on it can leave an unresolvable event, which counts as a
+	// hole and rightly prevents a skip. That is not this test's subject.
+	if st.Overflowed {
+		t.Skip("another process on this filesystem made the window unprovable")
 	}
 	res, _ := Checkpoint(h.sock, "manual", "")
 	if !res.Skipped || res.ID != 0 {

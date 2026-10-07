@@ -22,9 +22,11 @@ type Writes struct {
 }
 
 // OpenWrites marks the whole mount, so files in directories created later
-// are covered too. Needs CAP_SYS_ADMIN.
+// are covered too. Needs CAP_SYS_ADMIN. The queue is unlimited: the mark
+// sees every write on the mount, and a burst elsewhere on the disk must not
+// cost events in the protected folder.
 func OpenWrites(root string) (*Writes, error) {
-	fan, err := unix.FanotifyInit(unix.FAN_CLASS_NOTIF|unix.FAN_CLOEXEC|unix.FAN_NONBLOCK, unix.O_RDONLY|unix.O_CLOEXEC)
+	fan, err := unix.FanotifyInit(unix.FAN_CLASS_NOTIF|unix.FAN_CLOEXEC|unix.FAN_NONBLOCK|unix.FAN_UNLIMITED_QUEUE, unix.O_RDONLY|unix.O_CLOEXEC)
 	if err != nil {
 		return nil, fmt.Errorf("fanotify_init (needs CAP_SYS_ADMIN): %w", err)
 	}

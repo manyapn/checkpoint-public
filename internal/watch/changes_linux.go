@@ -47,7 +47,7 @@ type Changes struct {
 // kernel identifies the parent directory by file handle, which is resolved
 // back to a path with open_by_handle_at.
 func OpenChanges(root string) (*Changes, error) {
-	fan, err := unix.FanotifyInit(unix.FAN_CLASS_NOTIF|unix.FAN_REPORT_FID|unix.FAN_REPORT_DIR_FID|unix.FAN_REPORT_NAME|unix.FAN_NONBLOCK, 0)
+	fan, err := unix.FanotifyInit(unix.FAN_CLASS_NOTIF|unix.FAN_REPORT_FID|unix.FAN_REPORT_DIR_FID|unix.FAN_REPORT_NAME|unix.FAN_NONBLOCK|unix.FAN_UNLIMITED_QUEUE, 0)
 	if err != nil {
 		return nil, fmt.Errorf("fanotify_init: %w", err)
 	}
