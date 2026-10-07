@@ -1,6 +1,7 @@
 package lineage
 
 import (
+	"encoding/binary"
 	"os"
 	"runtime"
 	"strconv"
@@ -65,6 +66,7 @@ func (t *Tracker) Run(stop <-chan struct{}) {
 		return
 	}
 	defer dir.Close()
+	buf := make([]byte, 64*1024)
 	present := map[int]bool{}
 	lastPass := time.Now()
 	for {
@@ -78,14 +80,8 @@ func (t *Tracker) Run(stop <-chan struct{}) {
 			clear(present) // scanner stalled: re-read everything
 		}
 		lastPass = now
-		dir.Seek(0, 0)
-		names, _ := dir.Readdirnames(-1)
-		nowPresent := make(map[int]bool, len(names))
-		for _, name := range names {
-			pid, err := strconv.Atoi(name)
-			if err != nil {
-				continue
-			}
+		nowPresent := make(map[int]bool, len(present))
+		for _, pid := range listPids(dir, buf) {
 			nowPresent[pid] = true
 			if !present[pid] {
 				t.observe(pid, now)
@@ -104,6 +100,45 @@ func (t *Tracker) Run(stop <-chan struct{}) {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+}
+
+// listPids reads /proc with getdents into a reused buffer: this loop runs
+// continuously while an agent works, and a short-lived child is only caught
+// if a pass overlaps its lifetime, so each pass is kept as cheap as possible.
+func listPids(dir *os.File, buf []byte) []int {
+	var pids []int
+	unix.Seek(int(dir.Fd()), 0, 0)
+	for {
+		n, err := unix.Getdents(int(dir.Fd()), buf)
+		if err != nil || n <= 0 {
+			return pids
+		}
+		for off := 0; off < n; {
+			reclen := int(binary.LittleEndian.Uint16(buf[off+16:]))
+			if reclen <= 0 || off+reclen > n {
+				return pids
+			}
+			if pid := pidFromName(buf[off+19 : off+reclen]); pid > 0 {
+				pids = append(pids, pid)
+			}
+			off += reclen
+		}
+	}
+}
+
+// pidFromName parses an all-digit NUL-terminated dirent name; 0 otherwise.
+func pidFromName(name []byte) int {
+	pid := 0
+	for _, c := range name {
+		if c == 0 {
+			break
+		}
+		if c < '0' || c > '9' {
+			return 0
+		}
+		pid = pid*10 + int(c-'0')
+	}
+	return pid
 }
 
 // observe records a pid's birth parent. A known pid with the same start

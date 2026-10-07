@@ -171,14 +171,10 @@ func (s *server) poll(timeoutMs int) bool {
 }
 
 // drain moves queued kernel events into the write log and the dirty set.
+// Deletes go first: a deleting process (rm) is short-lived, and classifying
+// it before the slower content reads gives the best chance that it is
+// still alive to be asked about.
 func (s *server) drain() int {
-	n := 0
-	s.writes.Drain(func(path string, fd int, pid int) {
-		if s.rec.write(path, fd, pid) {
-			n++
-		}
-	})
-	s.captured += n
 	if s.changes != nil {
 		for _, ch := range s.changes.Drain() {
 			s.dirty[ch.Path] = true
@@ -187,6 +183,13 @@ func (s *server) drain() int {
 			}
 		}
 	}
+	n := 0
+	s.writes.Drain(func(path string, fd int, pid int) {
+		if s.rec.write(path, fd, pid) {
+			n++
+		}
+	})
+	s.captured += n
 	return n
 }
 

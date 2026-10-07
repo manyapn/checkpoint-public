@@ -89,6 +89,7 @@ func (r *recorder) write(path string, fd int, pid int) bool {
 	if r.skip(path) {
 		return false
 	}
+	writer := r.who(pid) // first: the writer may be about to exit
 	var st unix.Stat_t
 	if unix.Fstat(fd, &st) != nil {
 		r.missed = append(r.missed, path)
@@ -105,7 +106,7 @@ func (r *recorder) write(path string, fd int, pid int) bool {
 		return true
 	}
 	r.log.Append(writelog.Entry{Op: writelog.Write, Path: path, Ref: ref,
-		Mode: uint32(st.Mode & 0o7777), Writer: r.who(pid), TimeNS: time.Now().UnixNano()})
+		Mode: uint32(st.Mode & 0o7777), Writer: writer, TimeNS: time.Now().UnixNano()})
 	return true
 }
 
