@@ -74,9 +74,10 @@ func (c *Changes) Close() {
 	unix.Close(c.fan)
 }
 
-// Drain returns the queued changes under root. A kernel overflow or an
-// unresolvable parent sets Overflowed: the change set has a hole and the
-// next checkpoint must scan rather than fold.
+// Drain returns the queued changes under root. A kernel overflow or a
+// parent handle that fails to resolve for any reason other than having been
+// deleted sets Overflowed: the change set has a hole and the next checkpoint
+// must scan rather than fold.
 func (c *Changes) Drain() []Change {
 	var out []Change
 	for {
@@ -131,8 +132,14 @@ func (c *Changes) named(op string, infoType byte, infos []info, pid int, isDir b
 		if in.kind != infoType || in.name == "" {
 			continue
 		}
-		dir, ok := c.resolveDir(in.handleType, in.handle)
-		if !ok {
+		dir, err := c.resolveDir(in.handleType, in.handle)
+		if err == unix.ESTALE {
+			// The parent directory is gone. Its own delete event, under a
+			// directory that still exists, already says so; this entry adds
+			// nothing and is not a hole.
+			continue
+		}
+		if err != nil {
 			c.Overflowed = true
 			continue
 		}
@@ -148,10 +155,10 @@ func (c *Changes) named(op string, infoType byte, infos []info, pid int, isDir b
 	return out
 }
 
-func (c *Changes) resolveDir(handleType int32, handle []byte) (string, bool) {
+func (c *Changes) resolveDir(handleType int32, handle []byte) (string, error) {
 	key := string(handle)
 	if p, ok := c.dirs[key]; ok {
-		return p, true
+		return p, nil
 	}
 	fh := make([]byte, 8+len(handle))
 	binary.LittleEndian.PutUint32(fh[0:], uint32(len(handle)))
@@ -159,15 +166,15 @@ func (c *Changes) resolveDir(handleType int32, handle []byte) (string, bool) {
 	copy(fh[8:], handle)
 	fd, _, errno := unix.Syscall(unix.SYS_OPEN_BY_HANDLE_AT, uintptr(c.mount), uintptr(unsafe.Pointer(&fh[0])), uintptr(unix.O_RDONLY))
 	if errno != 0 {
-		return "", false
+		return "", errno
 	}
 	path, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
 	unix.Close(int(fd))
 	if err != nil {
-		return "", false
+		return "", err
 	}
 	c.dirs[key] = path
-	return path, true
+	return path, nil
 }
 
 type info struct {

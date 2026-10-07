@@ -113,8 +113,9 @@ func TestAgentWritesAreAttributedByLineage(t *testing.T) {
 	if err := Register(h.sock, id); err != nil {
 		t.Fatal(err)
 	}
-	// the test binary is the checkpoint binary, so a human must be another program
-	human := exec.Command("sh", "-c", "echo me > human.txt")
+	// The test binary is the checkpoint binary, so the human must be another
+	// program, and one that stays alive a moment like an editor would.
+	human := exec.Command("sh", "-c", "echo me > human.txt; sleep 0.3")
 	human.Dir = h.root
 	human.Run()
 	agent.Wait()
@@ -139,12 +140,6 @@ func TestUnchangedWindowIsSkipped(t *testing.T) {
 	st, _ := GetStatus(h.sock)
 	if !st.FeedActive {
 		t.Skip("skip-empty needs the change feed")
-	}
-	// The feed marks the whole filesystem; another process deleting a
-	// directory on it can leave an unresolvable event, which counts as a
-	// hole and rightly prevents a skip. That is not this test's subject.
-	if st.Overflowed {
-		t.Skip("another process on this filesystem made the window unprovable")
 	}
 	res, _ := Checkpoint(h.sock, "manual", "")
 	if !res.Skipped || res.ID != 0 {
